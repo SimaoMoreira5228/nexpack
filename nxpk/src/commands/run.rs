@@ -1,50 +1,79 @@
 use nexpack_core::{Bundle, Verifier};
+use std::os::unix::process::CommandExt;
+use std::process::Command;
 
 pub fn run(bundle_path: &str, args: &[String]) -> anyhow::Result<()> {
 	let bundle = Bundle::open(bundle_path)?;
 
-	println!("App:      {} v{}", bundle.header.app_id, bundle.header.app_version);
-	println!("Entry:    {}", bundle.header.entrypoint);
-	println!("Layers:   {}", bundle.header.layers.len());
-	println!("Verifying layers...");
+	eprintln!("App:      {} v{}", bundle.header.app_id, bundle.header.app_version);
+	eprintln!("Entry:    {}", bundle.header.entrypoint);
+	eprintln!("Layers:   {}", bundle.header.layers.len());
 	Verifier::verify_layers(&bundle)?;
-	println!("  BLAKE3 digests OK");
 
 	Verifier::verify_signature(&bundle)?;
 
 	let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
 	let socket_path = std::path::PathBuf::from(&runtime_dir).join("nexpack.sock");
 
-	if socket_path.exists() {
-		let request = serde_json::json!({
-			"method": "mount",
-			"bundle": bundle_path,
-		});
+	if !socket_path.exists() {
+		anyhow::bail!("nexpackd not running. Start with: nexpackd &");
+	}
 
-		let response = send_ipc(&socket_path, &request)?;
-		println!(
-			"Daemon:   {}",
-			response.get("status").and_then(|v| v.as_str()).unwrap_or("unknown")
-		);
+	let request = serde_json::json!({
+		"method": "mount",
+		"bundle": bundle_path,
+	});
 
-		if let Some(rootfs) = response.get("rootfs").and_then(|v| v.as_str()) {
-			let entrypoint = bundle.header.entrypoint.clone();
-			println!("Launching: {} in {}", entrypoint, rootfs);
-			println!("(sandbox exec is stubbed — in v0.4, this will exec bwrap)");
+	let response = send_ipc(&socket_path, &request)?;
+
+	let status = response.get("status").and_then(|v| v.as_str()).unwrap_or("error");
+	if status != "mounted" {
+		anyhow::bail!("daemon mount failed: {}", response);
+	}
+
+	let rootfs = response
+		.get("rootfs")
+		.and_then(|v| v.as_str())
+		.ok_or_else(|| anyhow::anyhow!("no rootfs in response"))?;
+
+	let entrypoint = bundle.header.entrypoint.clone();
+
+	if let Some(bwrap_args) = response.get("bwrap_args").and_then(|v| v.as_array()) {
+		eprintln!("Launching sandboxed: {} (via bwrap)", entrypoint);
+
+		let bwrap_path = find_bwrap()?;
+		let mut cmd = Command::new(&bwrap_path);
+
+		for arg in bwrap_args {
+			cmd.arg(arg.as_str().unwrap_or_default());
 		}
-	} else {
-		println!("nexpackd not running — direct execution mode");
-		println!("\nTo start the daemon:");
-		println!("  nexpackd &\n");
 
-		println!("Would mount overlayfs at /run/nexpack/{}/rootfs", bundle.header.app_id);
-		println!("Would exec: {}", bundle.header.entrypoint);
-		if !args.is_empty() {
-			println!("With args: {:?}", args);
+		for a in args {
+			cmd.arg(a);
 		}
+
+		let err = cmd.exec();
+		anyhow::bail!("failed to exec bwrap: {}", err);
+	}
+
+	eprintln!("Launching: {} in {} (no sandbox)", entrypoint, rootfs);
+	eprintln!("(add --sandbox flag to enable bwrap)");
+
+	if !args.is_empty() {
+		eprintln!("With args: {:?}", args);
 	}
 
 	Ok(())
+}
+
+fn find_bwrap() -> anyhow::Result<String> {
+	for dir in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()) {
+		let candidate = dir.join("bwrap");
+		if candidate.is_file() {
+			return Ok(candidate.to_string_lossy().to_string());
+		}
+	}
+	anyhow::bail!("bwrap not found in PATH. Install bubblewrap.")
 }
 
 fn send_ipc(socket_path: &std::path::Path, request: &serde_json::Value) -> anyhow::Result<serde_json::Value> {

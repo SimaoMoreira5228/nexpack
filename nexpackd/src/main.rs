@@ -7,6 +7,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::RwLock;
 
 mod mount;
+mod sandbox;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -97,6 +98,12 @@ async fn handle_mount(request: serde_json::Value, state: &Arc<RwLock<DaemonState
 	let merged = mount::build_overlay(&app_id, &bundle, &store_dir)?;
 	let entrypoint = bundle.header.entrypoint.clone();
 
+	let bwrap_args: Vec<String> =
+		sandbox::build_bwrap_args(&merged.to_string_lossy(), &bundle.header.permissions, &entrypoint, &[])
+			.iter()
+			.map(|o| o.to_string_lossy().to_string())
+			.collect();
+
 	let mut state = state.write().await;
 	let entry = state.mounts.entry(app_id.clone()).or_insert(MountEntry {
 		app_id: app_id.clone(),
@@ -110,6 +117,7 @@ async fn handle_mount(request: serde_json::Value, state: &Arc<RwLock<DaemonState
 		"app_id": app_id,
 		"rootfs": merged.to_string_lossy(),
 		"entrypoint": entrypoint,
+		"bwrap_args": bwrap_args,
 	}))
 }
 

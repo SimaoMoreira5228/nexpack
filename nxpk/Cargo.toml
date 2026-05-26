@@ -14,3 +14,4 @@ tracing-subscriber.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
 ciborium.workspace = true
+toml.workspace = true

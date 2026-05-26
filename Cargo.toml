@@ -27,3 +27,4 @@ capnp = "0.25"
 capnpc = "0.25"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
+toml = "1.1"
