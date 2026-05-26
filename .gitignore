@@ -1,0 +1,11 @@
+/target
+/local
+/.direnv
+/.ruff_cache
+stub/stub
+test.nxpk
+__pycache__/
+*.pyc
+*.swp
+*.swo
+.DS_Store
