@@ -19,5 +19,33 @@ pub fn verify(bundle_path: &str) -> anyhow::Result<()> {
 	}
 
 	println!("\nAll layer digests verified successfully");
+
+	println!("\nSignature:");
+	match nexpack_core::signing::verify_signature(&bundle) {
+		Ok(()) => println!("  OK — Sigstore signature verified"),
+		Err(e) => {
+			println!("  NONE — {}", e);
+		}
+	}
+
+	if bundle.header.signature.is_some() {
+		let trust = match nexpack_core::TrustConfig::load() {
+			Ok(t) => t,
+			Err(e) => {
+				println!("  Trust policy: error loading ({})", e);
+				return Ok(());
+			}
+		};
+
+		if let Some((pattern, entry)) = trust.match_policy(&bundle.header.app_id) {
+			println!("  Trust policy matched: \"{}\"", pattern);
+			for id in &entry.identities {
+				println!("    Allowed identity: {}", id);
+			}
+		} else {
+			println!("  Trust policy: no matching policy for this app_id");
+		}
+	}
+
 	Ok(())
 }

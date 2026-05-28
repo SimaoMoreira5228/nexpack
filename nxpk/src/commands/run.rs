@@ -12,6 +12,15 @@ pub fn run(bundle_path: &str, args: &[String]) -> anyhow::Result<()> {
 
 	Verifier::verify_signature(&bundle)?;
 
+	if bundle.header.signature.is_some() {
+		let trust = nexpack_core::TrustConfig::load()?;
+		if let Some((_pattern, entry)) = trust.match_policy(&bundle.header.app_id) {
+			if let Some(identity) = entry.identities.first() {
+				eprintln!("Trust policy: requiring identity \"{}\"", identity);
+			}
+		}
+	}
+
 	let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
 	let socket_path = std::path::PathBuf::from(&runtime_dir).join("nexpack.sock");
 

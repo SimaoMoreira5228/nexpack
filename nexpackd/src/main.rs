@@ -2,6 +2,7 @@ use nexpack_core::Bundle;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::RwLock;
@@ -25,6 +26,17 @@ async fn main() -> anyhow::Result<()> {
 		store: nexpack_core::Store::user().ok(),
 	}));
 
+	let updater_state = state.clone();
+	let check_interval = std::env::var("NEXPACK_UPDATE_INTERVAL")
+		.ok()
+		.and_then(|s| s.parse::<u64>().ok())
+		.map(Duration::from_secs)
+		.unwrap_or(Duration::from_secs(3600));
+
+	tokio::spawn(async move {
+		background_update_checker(updater_state, check_interval).await;
+	});
+
 	let listener = UnixListener::bind(&socket_path)?;
 	tracing::info!("nexpackd listening on {}", socket_path.display());
 
@@ -39,11 +51,126 @@ async fn main() -> anyhow::Result<()> {
 	}
 }
 
+async fn background_update_checker(_state: Arc<RwLock<DaemonState>>, interval: Duration) {
+	loop {
+		tokio::time::sleep(interval).await;
+
+		let store = match nexpack_core::Store::user() {
+			Ok(s) => s,
+			Err(_) => continue,
+		};
+
+		let apps = match store.list_apps() {
+			Ok(a) => a,
+			Err(_) => continue,
+		};
+
+		for app_id in &apps {
+			let app_dir = store.apps_dir().join(app_id);
+			let meta_path = app_dir.join("meta.cbor");
+
+			let meta = match std::fs::read(&meta_path) {
+				Ok(m) => m,
+				Err(_) => continue,
+			};
+
+			let header: nexpack_core::BundleHeader = match ciborium::de::from_reader(&meta[..]) {
+				Ok(h) => h,
+				Err(_) => continue,
+			};
+
+			let update_url = match &header.update_url {
+				Some(url) => url.clone(),
+				None => continue,
+			};
+
+			tracing::debug!("checking updates for {} from {}", app_id, update_url);
+
+			let feed = match reqwest::get(&update_url).await {
+				Ok(r) if r.status().is_success() => match r.json::<nexpack_core::update::UpdateFeed>().await {
+					Ok(f) => f,
+					Err(_) => continue,
+				},
+				_ => continue,
+			};
+
+			if feed.latest == header.app_version {
+				tracing::debug!("{} is up to date (v{})", app_id, feed.latest);
+				continue;
+			}
+
+			let release = match feed.latest_release() {
+				Some(r) => r,
+				None => continue,
+			};
+
+			tracing::info!("update available for {}: v{} -> v{}", app_id, header.app_version, feed.latest);
+
+			let missing = release.missing_layers(&store);
+			if missing.is_empty() {
+				tracing::debug!("{}: all layers already in store", app_id);
+			} else {
+				for layer in &missing {
+					let hex = layer.digest.strip_prefix("blake3:").unwrap_or(&layer.digest);
+					tracing::info!("pre-fetching layer {} for {}", &hex[..16], app_id);
+
+					match reqwest::get(&layer.url).await {
+						Ok(r) if r.status().is_success() => match r.bytes().await {
+							Ok(data) => {
+								if let Err(e) = store.store_layer(&data, hex) {
+									tracing::warn!("failed to store layer {}: {}", hex, e);
+								}
+							}
+							Err(e) => tracing::warn!("failed to download layer {}: {}", hex, e),
+						},
+						_ => tracing::warn!("HTTP error fetching layer {}", hex),
+					}
+				}
+			}
+
+			let new_digest = release
+				.layers
+				.last()
+				.map(|l| l.digest.strip_prefix("blake3:").unwrap_or(&l.digest))
+				.unwrap_or("");
+
+			if !new_digest.is_empty() && store.has_layer(new_digest) {
+				let current_link = app_dir.join("current");
+				let tmp_link = app_dir.join("current.tmp");
+				let target = format!("../../../layers/blake3-{}/image.erofs", new_digest);
+				let _ = std::fs::remove_file(&tmp_link);
+				if let Ok(()) = std::os::unix::fs::symlink(&target, &tmp_link) {
+					let _ = std::fs::rename(&tmp_link, &current_link);
+				}
+				let _ = store.add_gc_root(app_id, new_digest);
+			}
+
+			let mut new_header = header.clone();
+			new_header.app_version = release.version.clone();
+			new_header.layers.clear();
+			for l in &release.layers {
+				new_header.layers.push(nexpack_core::LayerRef {
+					digest: l.digest.clone(),
+					size: l.size,
+					role: String::new(),
+				});
+			}
+			if let Ok(new_meta) = new_header.encode() {
+				let _ = std::fs::write(&meta_path, &new_meta);
+			}
+
+			tracing::info!("{} updated to v{} in background", app_id, feed.latest);
+		}
+	}
+}
+
+#[allow(dead_code)]
 struct DaemonState {
 	mounts: HashMap<String, MountEntry>,
 	store: Option<nexpack_core::Store>,
 }
 
+#[allow(dead_code)]
 struct MountEntry {
 	app_id: String,
 	rootfs: PathBuf,

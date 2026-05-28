@@ -69,6 +69,13 @@ enum Commands {
 	Search {
 		query: String,
 	},
+
+	Sign {
+		bundle: String,
+
+		#[arg(long, short)]
+		output: Option<String>,
+	},
 }
 
 fn main() -> anyhow::Result<()> {
@@ -94,5 +101,6 @@ fn main() -> anyhow::Result<()> {
 		Commands::Pack { spec } => commands::pack::pack(&spec),
 		Commands::Export { app_id } => commands::export::export_app(&app_id),
 		Commands::Search { query } => commands::search::search(&query),
+		Commands::Sign { bundle, output } => commands::sign::sign_bundle(&bundle, output.as_deref()),
 	}
 }

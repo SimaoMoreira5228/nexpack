@@ -2,13 +2,16 @@ pub mod error;
 pub mod header;
 pub mod layer;
 pub mod permission;
+pub mod signing;
 pub mod store;
+pub mod update;
 pub mod verify;
 
 pub use error::Error;
 pub use header::BundleHeader;
 pub use layer::LayerRef;
 pub use permission::PermissionSet;
+pub use signing::TrustConfig;
 pub use store::Store;
 pub use verify::Verifier;
 

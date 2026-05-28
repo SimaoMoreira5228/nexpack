@@ -15,3 +15,4 @@ anyhow.workspace = true
 tokio.workspace = true
 ciborium.workspace = true
 toml.workspace = true
+reqwest.workspace = true

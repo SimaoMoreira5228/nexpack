@@ -40,10 +40,8 @@ impl Verifier {
 		Ok(())
 	}
 
-	pub fn verify_signature(_bundle: &Bundle) -> Result<()> {
-		// TODO: Implement Sigstore verification
-
-		Ok(())
+	pub fn verify_signature(bundle: &Bundle) -> Result<()> {
+		crate::signing::verify_signature(bundle)
 	}
 
 	pub fn verify_sbom(_bundle: &Bundle) -> Result<()> {

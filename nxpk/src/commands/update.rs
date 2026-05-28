@@ -1,4 +1,4 @@
-use nexpack_core::Store;
+use nexpack_core::{Store, Verifier};
 
 pub fn update(app_id: Option<&str>, all: bool) -> anyhow::Result<()> {
 	if all {
@@ -9,24 +9,25 @@ pub fn update(app_id: Option<&str>, all: bool) -> anyhow::Result<()> {
 			return Ok(());
 		}
 		for app in &apps {
-			check_updates(app)?;
+			if let Err(e) = check_and_apply_updates(app) {
+				eprintln!("  error updating {}: {}", app, e);
+			}
 		}
 	} else if let Some(id) = app_id {
-		check_updates(id)?;
+		check_and_apply_updates(id)?;
 	} else {
 		println!("Usage: nxpk update <app-id> | nxpk update --all");
 	}
 	Ok(())
 }
 
-fn check_updates(app_id: &str) -> anyhow::Result<()> {
+fn check_and_apply_updates(app_id: &str) -> anyhow::Result<()> {
 	let store = Store::user()?;
 	let app_dir = store.apps_dir().join(app_id);
 	let meta_path = app_dir.join("meta.cbor");
 
 	if !meta_path.exists() {
-		println!("App '{}' not installed", app_id);
-		return Ok(());
+		anyhow::bail!("app '{}' is not installed", app_id);
 	}
 
 	let meta = std::fs::read(&meta_path)?;
@@ -41,9 +42,126 @@ fn check_updates(app_id: &str) -> anyhow::Result<()> {
 		}
 	};
 
-	println!("{}: checking {} for updates...", app_id, update_url);
-	// TODO: Fetch update feed, compare digests, download missing layers
-	println!("  (update feed fetch not yet implemented)");
+	println!("{}: checking {}...", app_id, update_url);
 
+	let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+
+	let feed = rt.block_on(fetch_feed(&update_url))?;
+
+	if feed.app_id != app_id {
+		anyhow::bail!("feed app_id '{}' doesn't match installed app '{}'", feed.app_id, app_id);
+	}
+
+	println!("  current: v{}  latest: v{}", header.app_version, feed.latest);
+
+	if feed.latest == header.app_version {
+		println!("  already up to date");
+		return Ok(());
+	}
+
+	let release = match feed.latest_release() {
+		Some(r) => r,
+		None => anyhow::bail!("feed has no release for version '{}'", feed.latest),
+	};
+
+	let missing = release.missing_layers(&store);
+	if missing.is_empty() {
+		println!("  all layers already in store");
+	} else {
+		println!("  downloading {} missing layers...", missing.len());
+		for layer in &missing {
+			let hex = layer.digest.strip_prefix("blake3:").unwrap_or(&layer.digest);
+			println!("    downloading layer {} ({})", &hex[..16], format_size(layer.size));
+
+			let data = rt.block_on(download_layer(&layer.url))?;
+
+			if data.len() as u64 != layer.size {
+				anyhow::bail!("size mismatch for {}: expected {}, got {}", hex, layer.size, data.len());
+			}
+
+			Verifier::verify_digest(&data, hex)?;
+			store.store_layer(&data, hex)?;
+			println!("      stored and verified");
+		}
+	}
+
+	let new_digest = release
+		.layers
+		.last()
+		.map(|l| l.digest.strip_prefix("blake3:").unwrap_or(&l.digest))
+		.unwrap_or("");
+
+	if !new_digest.is_empty() && store.has_layer(new_digest) {
+		let current_link = app_dir.join("current");
+
+		let tmp_link = app_dir.join("current.tmp");
+		let target = format!("../../../layers/blake3-{}/image.erofs", new_digest);
+		let _ = std::fs::remove_file(&tmp_link);
+		std::os::unix::fs::symlink(&target, &tmp_link)?;
+		std::fs::rename(&tmp_link, &current_link)?;
+
+		store.add_gc_root(app_id, new_digest)?;
+	}
+
+	let mut new_header = header.clone();
+	new_header.app_version = release.version.clone();
+	new_header.layers.clear();
+	for l in &release.layers {
+		new_header.layers.push(nexpack_core::LayerRef {
+			digest: l.digest.clone(),
+			size: l.size,
+			role: String::new(),
+		});
+	}
+	let new_meta = new_header.encode()?;
+	std::fs::write(&meta_path, &new_meta)?;
+
+	println!("  updated to v{}", feed.latest);
 	Ok(())
+}
+
+async fn fetch_feed(url: &str) -> anyhow::Result<nexpack_core::update::UpdateFeed> {
+	let resp = reqwest::get(url)
+		.await
+		.map_err(|e| anyhow::anyhow!("fetching update feed: {}", e))?;
+
+	if !resp.status().is_success() {
+		anyhow::bail!("HTTP {} fetching {}", resp.status(), url);
+	}
+
+	let feed: nexpack_core::update::UpdateFeed = resp
+		.json()
+		.await
+		.map_err(|e| anyhow::anyhow!("parsing feed from {}: {}", url, e))?;
+
+	Ok(feed)
+}
+
+async fn download_layer(url: &str) -> anyhow::Result<Vec<u8>> {
+	let resp = reqwest::get(url)
+		.await
+		.map_err(|e| anyhow::anyhow!("downloading {}: {}", url, e))?;
+
+	if !resp.status().is_success() {
+		anyhow::bail!("HTTP {} downloading {}", resp.status(), url);
+	}
+
+	let data = resp.bytes().await.map_err(|e| anyhow::anyhow!("reading {}: {}", url, e))?;
+
+	Ok(data.to_vec())
+}
+
+fn format_size(size: u64) -> String {
+	const UNITS: &[&str] = &["B", "KB", "MB", "GB"];
+	let mut s = size as f64;
+	let mut unit_idx = 0;
+	while s >= 1024.0 && unit_idx < UNITS.len() - 1 {
+		s /= 1024.0;
+		unit_idx += 1;
+	}
+	if unit_idx == 0 {
+		format!("{} {}", size, UNITS[unit_idx])
+	} else {
+		format!("{:.1} {}", s, UNITS[unit_idx])
+	}
 }
