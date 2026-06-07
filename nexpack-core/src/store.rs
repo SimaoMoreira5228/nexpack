@@ -12,6 +12,14 @@ impl Store {
 		Ok(Self { root })
 	}
 
+	pub fn nexpack_home() -> Result<PathBuf, Error> {
+		crate::nexpack_home()
+	}
+
+	pub fn bin_dir() -> Result<PathBuf, Error> {
+		crate::nexpack_bin_dir()
+	}
+
 	pub fn open(root: impl Into<PathBuf>) -> Self {
 		Self { root: root.into() }
 	}

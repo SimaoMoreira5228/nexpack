@@ -1,5 +1,7 @@
 use nexpack_core::permission::{PermissionSet, PermissionValue};
-use nexpack_core::{BundleHeader, LayerRef, Verifier, generate_sbom};
+use nexpack_core::{
+	BootstrapEntry, BundleHeader, LayerRef, Verifier, generate_sbom, make_bootstrap_data, make_bootstrap_trailer,
+};
 use std::path::{Path, PathBuf};
 
 #[derive(serde::Deserialize)]
@@ -7,6 +9,7 @@ struct PackSpec {
 	app: PackApp,
 	permissions: Option<PackPermissions>,
 	layer: Vec<PackLayer>,
+	bootstrap: Option<PackBootstrap>,
 }
 
 #[derive(serde::Deserialize)]
@@ -29,6 +32,12 @@ struct PackPermissions {
 struct PackLayer {
 	role: String,
 	source: String,
+}
+
+#[derive(serde::Deserialize)]
+struct PackBootstrap {
+	nexpackd: Option<String>,
+	nxpk: Option<String>,
 }
 
 pub fn pack(spec_path: &str) -> anyhow::Result<()> {
@@ -79,6 +88,7 @@ pub fn pack(spec_path: &str) -> anyhow::Result<()> {
 		.map_err(|e| anyhow::anyhow!("SBOM generation failed: {}", e))?;
 		Some(sbom_data)
 	};
+	let bootstrap_data = build_bootstrap_data(&spec, spec_dir)?;
 	let header = BundleHeader {
 		version: 1,
 		app_id: spec.app.id,
@@ -89,6 +99,7 @@ pub fn pack(spec_path: &str) -> anyhow::Result<()> {
 		signature: None,
 		sbom,
 		update_url: None,
+		bootstrap_size: bootstrap_data.as_ref().map(|d| d.len() as u64),
 		offset: 0,
 		encoded_len: 0,
 	};
@@ -103,6 +114,14 @@ pub fn pack(spec_path: &str) -> anyhow::Result<()> {
 
 	for data in &layer_data {
 		out.write_all(data)?;
+	}
+
+	if let Some(ref boot) = bootstrap_data {
+		let boot_offset = out.metadata()?.len();
+		out.write_all(boot)?;
+		let trailer = make_bootstrap_trailer(boot_offset, boot.len() as u64);
+		out.write_all(&trailer)?;
+		eprintln!("  Bootstrap: {} B (nexpackd + nxpk)", boot.len());
 	}
 
 	let file_size = output_path.metadata()?.len();
@@ -209,6 +228,46 @@ fn find_tool(name: &str) -> Option<String> {
 		}
 	}
 	None
+}
+
+fn build_bootstrap_data(spec: &PackSpec, spec_dir: &Path) -> anyhow::Result<Option<Vec<u8>>> {
+	let bootstrap_spec = match &spec.bootstrap {
+		Some(b) => b,
+		None => return Ok(None),
+	};
+
+	let mut entries = Vec::new();
+
+	if let Some(ref path_str) = bootstrap_spec.nexpackd {
+		let path = spec_dir.join(path_str);
+		let data = std::fs::read(&path)
+			.map_err(|e| anyhow::anyhow!("reading nexpackd bootstrap binary '{}': {}", path.display(), e))?;
+		entries.push(BootstrapEntry {
+			name: "nexpackd".into(),
+			data,
+		});
+	}
+
+	if let Some(ref path_str) = bootstrap_spec.nxpk {
+		let path = spec_dir.join(path_str);
+		let data = std::fs::read(&path)
+			.map_err(|e| anyhow::anyhow!("reading nxpk bootstrap binary '{}': {}", path.display(), e))?;
+		entries.push(BootstrapEntry {
+			name: "nxpk".into(),
+			data,
+		});
+	}
+
+	if entries.is_empty() {
+		return Ok(None);
+	}
+
+	eprintln!("Embedding bootstrap binaries:");
+	for e in &entries {
+		eprintln!("  {} ({} B)", e.name, e.data.len());
+	}
+
+	Ok(Some(make_bootstrap_data(&entries)))
 }
 
 fn spec_to_permissions(spec: &Option<PackPermissions>) -> PermissionSet {

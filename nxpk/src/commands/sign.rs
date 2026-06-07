@@ -48,6 +48,7 @@ pub fn sign_bundle(bundle_path: &str, output: Option<&str>) -> anyhow::Result<()
 
 	let header = nexpack_core::BundleHeader {
 		signature: Some(sig_data),
+		bootstrap_size: bundle.header.bootstrap_size,
 		..bundle.header.clone()
 	};
 

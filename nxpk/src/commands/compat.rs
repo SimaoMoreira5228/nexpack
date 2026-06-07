@@ -409,6 +409,7 @@ pub fn convert_appimage(appimage: &str, output: Option<&str>) -> anyhow::Result<
 		signature: None,
 		sbom: None,
 		update_url: None,
+		bootstrap_size: None,
 		offset: 0,
 		encoded_len: 0,
 	};

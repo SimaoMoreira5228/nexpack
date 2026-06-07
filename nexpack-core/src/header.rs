@@ -14,6 +14,7 @@ pub struct BundleHeader {
 	pub signature: Option<Vec<u8>>,
 	pub sbom: Option<Vec<u8>>,
 	pub update_url: Option<String>,
+	pub bootstrap_size: Option<u64>,
 
 	#[serde(skip)]
 	pub offset: u64,
