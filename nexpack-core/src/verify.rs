@@ -44,8 +44,15 @@ impl Verifier {
 		crate::signing::verify_signature(bundle)
 	}
 
-	pub fn verify_sbom(_bundle: &Bundle) -> Result<()> {
-		// TODO: Validate CycloneDX SBOM structure
-		Ok(())
+	pub fn verify_signature_opt(bundle: &Bundle, offline: bool) -> Result<()> {
+		crate::signing::verify_signature_opt(bundle, offline)
+	}
+
+	pub fn verify_sbom(bundle: &Bundle) -> Result<()> {
+		if let Some(ref sbom_data) = bundle.header.sbom {
+			crate::sbom::verify_sbom_data(sbom_data)
+		} else {
+			Ok(())
+		}
 	}
 }

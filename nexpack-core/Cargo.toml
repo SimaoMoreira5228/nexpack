@@ -20,3 +20,4 @@ sigstore-types.workspace = true
 sigstore-bundle.workspace = true
 sigstore-trust-root.workspace = true
 toml.workspace = true
+flate2.workspace = true

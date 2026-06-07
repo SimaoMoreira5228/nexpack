@@ -28,8 +28,9 @@ capnpc = "0.25"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 toml = "1.1"
-reqwest = { version = "0.13", features = ["json", "rustls"] }
+reqwest = { version = "0.13", features = ["json", "rustls", "blocking"] }
 sigstore-verify = { version = "0.8", features = ["rustls", "tuf"] }
 sigstore-types = "0.8"
 sigstore-bundle = "0.8"
 sigstore-trust-root = { version = "0.8", features = ["tuf"] }
+flate2 = "1.0"

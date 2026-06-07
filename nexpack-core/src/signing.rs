@@ -4,9 +4,12 @@ use sigstore_trust_root::trusted_root::{SIGSTORE_PRODUCTION_TRUSTED_ROOT, Truste
 
 pub fn artifact_bytes(bundle: &Bundle) -> Result<Vec<u8>> {
 	let mut data = Vec::new();
-	for i in 0..bundle.header.layers.len() {
-		let layer_data = bundle.extract_layer(i)?;
-		data.extend_from_slice(layer_data);
+	let mut header = bundle.header.clone();
+	header.signature = None;
+	let header_cbor = header.encode()?;
+	data.extend_from_slice(&header_cbor);
+	for layer in &bundle.header.layers {
+		data.extend_from_slice(layer.digest.as_bytes());
 	}
 	Ok(data)
 }
@@ -25,6 +28,10 @@ fn trusted_root() -> Result<TrustedRoot> {
 }
 
 pub fn verify_signature(bundle: &Bundle) -> Result<()> {
+	verify_signature_opt(bundle, false)
+}
+
+pub fn verify_signature_opt(bundle: &Bundle, offline: bool) -> Result<()> {
 	let sig_bytes = match &bundle.header.signature {
 		Some(s) => s,
 		None => return Err(Error::SignatureVerification("no signature in bundle".into())),
@@ -37,12 +44,16 @@ pub fn verify_signature(bundle: &Bundle) -> Result<()> {
 	let policy = sigstore_verify::VerificationPolicy {
 		identity: None,
 		issuer: None,
-		verify_tlog: true,
-		verify_timestamp: true,
+		verify_tlog: !offline,
+		verify_timestamp: !offline,
 		verify_certificate: true,
 		verify_sct: true,
 		clock_skew_seconds: 60,
 	};
+
+	if offline {
+		tracing::info!("offline mode: skipping Rekor tlog and timestamp verification");
+	}
 
 	sigstore_verify::verify(&artifact, &sig_bundle, &policy, &root)
 		.map_err(|e| Error::SignatureVerification(format!("verification failed: {}", e)))?;
@@ -51,6 +62,15 @@ pub fn verify_signature(bundle: &Bundle) -> Result<()> {
 }
 
 pub fn verify_with_identity(bundle: &Bundle, expected_identity: &str, expected_issuer: &str) -> Result<()> {
+	verify_with_identity_opt(bundle, expected_identity, expected_issuer, false)
+}
+
+pub fn verify_with_identity_opt(
+	bundle: &Bundle,
+	expected_identity: &str,
+	expected_issuer: &str,
+	offline: bool,
+) -> Result<()> {
 	let sig_bytes = match &bundle.header.signature {
 		Some(s) => s,
 		None => return Err(Error::SignatureVerification("no signature in bundle".into())),
@@ -63,12 +83,16 @@ pub fn verify_with_identity(bundle: &Bundle, expected_identity: &str, expected_i
 	let policy = sigstore_verify::VerificationPolicy {
 		identity: Some(expected_identity.to_string()),
 		issuer: Some(expected_issuer.to_string()),
-		verify_tlog: true,
-		verify_timestamp: true,
+		verify_tlog: !offline,
+		verify_timestamp: !offline,
 		verify_certificate: true,
 		verify_sct: true,
 		clock_skew_seconds: 60,
 	};
+
+	if offline {
+		tracing::info!("offline mode: skipping Rekor tlog and timestamp verification");
+	}
 
 	sigstore_verify::verify(&artifact, &sig_bundle, &policy, &root)
 		.map_err(|e| Error::SignatureVerification(format!("identity verification failed: {}", e)))?;

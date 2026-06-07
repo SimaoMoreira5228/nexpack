@@ -1,6 +1,6 @@
 use nexpack_core::permission::{PermissionSet, PermissionValue};
-use nexpack_core::{BundleHeader, LayerRef, Verifier};
-use std::path::Path;
+use nexpack_core::{BundleHeader, LayerRef, Verifier, generate_sbom};
+use std::path::{Path, PathBuf};
 
 #[derive(serde::Deserialize)]
 struct PackSpec {
@@ -68,6 +68,17 @@ pub fn pack(spec_path: &str) -> anyhow::Result<()> {
 	}
 
 	let permissions = spec_to_permissions(&spec.permissions);
+	let sbom = {
+		let source_dirs: Vec<PathBuf> = spec.layer.iter().map(|ls| spec_dir.join(&ls.source)).collect();
+		let refs: Vec<&Path> = source_dirs.iter().map(|p| p.as_path()).collect();
+		let sbom_data = generate_sbom(
+			spec.app.id.split('.').last().unwrap_or(&spec.app.id),
+			&spec.app.version,
+			&refs,
+		)
+		.map_err(|e| anyhow::anyhow!("SBOM generation failed: {}", e))?;
+		Some(sbom_data)
+	};
 	let header = BundleHeader {
 		version: 1,
 		app_id: spec.app.id,
@@ -76,7 +87,7 @@ pub fn pack(spec_path: &str) -> anyhow::Result<()> {
 		layers,
 		permissions,
 		signature: None,
-		sbom: None,
+		sbom,
 		update_url: None,
 		offset: 0,
 		encoded_len: 0,

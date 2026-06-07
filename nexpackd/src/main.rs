@@ -2,7 +2,7 @@ use nexpack_core::Bundle;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::RwLock;
@@ -24,6 +24,12 @@ async fn main() -> anyhow::Result<()> {
 	let state = Arc::new(RwLock::new(DaemonState {
 		mounts: HashMap::new(),
 		store: nexpack_core::Store::user().ok(),
+		idle_timeout: Duration::from_secs(
+			std::env::var("NEXPACK_IDLE_TIMEOUT")
+				.ok()
+				.and_then(|s| s.parse::<u64>().ok())
+				.unwrap_or(300),
+		),
 	}));
 
 	let updater_state = state.clone();
@@ -35,6 +41,11 @@ async fn main() -> anyhow::Result<()> {
 
 	tokio::spawn(async move {
 		background_update_checker(updater_state, check_interval).await;
+	});
+
+	let idle_state = state.clone();
+	tokio::spawn(async move {
+		idle_mount_cleaner(idle_state).await;
 	});
 
 	let listener = UnixListener::bind(&socket_path)?;
@@ -168,6 +179,7 @@ async fn background_update_checker(_state: Arc<RwLock<DaemonState>>, interval: D
 struct DaemonState {
 	mounts: HashMap<String, MountEntry>,
 	store: Option<nexpack_core::Store>,
+	idle_timeout: Duration,
 }
 
 #[allow(dead_code)]
@@ -175,6 +187,39 @@ struct MountEntry {
 	app_id: String,
 	rootfs: PathBuf,
 	refcount: u64,
+	last_active: Instant,
+}
+
+async fn idle_mount_cleaner(state: Arc<RwLock<DaemonState>>) {
+	let check_interval = Duration::from_secs(60);
+	loop {
+		tokio::time::sleep(check_interval).await;
+		let timeout = {
+			let s = state.read().await;
+			s.idle_timeout
+		};
+		let to_remove: Vec<String> = {
+			let s = state.read().await;
+			s.mounts
+				.iter()
+				.filter(|(_, e)| e.refcount == 0 && e.last_active.elapsed() >= timeout)
+				.map(|(id, _)| id.clone())
+				.collect()
+		};
+		for app_id in to_remove {
+			let mut s = state.write().await;
+			if let Some(entry) = s.mounts.get(&app_id) {
+				if entry.refcount == 0 && entry.last_active.elapsed() >= timeout {
+					tracing::info!("idle timeout: unmounting {}", app_id);
+					if let Err(e) = mount::unmount_overlay(&entry.rootfs) {
+						tracing::warn!("failed to unmount idle {}: {}", app_id, e);
+						continue;
+					}
+					s.mounts.remove(&app_id);
+				}
+			}
+		}
+	}
 }
 
 async fn handle_client(mut stream: UnixStream, state: Arc<RwLock<DaemonState>>) -> anyhow::Result<()> {
@@ -208,10 +253,13 @@ async fn handle_mount(request: serde_json::Value, state: &Arc<RwLock<DaemonState
 		.and_then(|v| v.as_str())
 		.ok_or_else(|| anyhow::anyhow!("missing 'bundle' field"))?;
 
+	let offline = request.get("offline").and_then(|v| v.as_bool()).unwrap_or(false);
+
 	let bundle = Bundle::open(bundle_path)?;
 	let app_id = bundle.header.app_id.clone();
 
 	nexpack_core::Verifier::verify_layers(&bundle)?;
+	let _ = nexpack_core::Verifier::verify_signature_opt(&bundle, offline);
 
 	let store_dir = nexpack_core::Store::user()?;
 	for (i, layer) in bundle.header.layers.iter().enumerate() {
@@ -236,8 +284,13 @@ async fn handle_mount(request: serde_json::Value, state: &Arc<RwLock<DaemonState
 		app_id: app_id.clone(),
 		rootfs: merged.clone(),
 		refcount: 0,
+		last_active: Instant::now(),
 	});
 	entry.refcount += 1;
+	entry.last_active = Instant::now();
+
+	let seccomp_filter = sandbox::generate_seccomp_filter(&bundle.header.permissions);
+	let seccomp_b64 = base64_encode(&seccomp_filter);
 
 	Ok(serde_json::json!({
 		"status": "mounted",
@@ -245,6 +298,7 @@ async fn handle_mount(request: serde_json::Value, state: &Arc<RwLock<DaemonState
 		"rootfs": merged.to_string_lossy(),
 		"entrypoint": entrypoint,
 		"bwrap_args": bwrap_args,
+		"seccomp_filter": seccomp_b64,
 	}))
 }
 
@@ -257,11 +311,13 @@ async fn handle_unmount(request: serde_json::Value, state: &Arc<RwLock<DaemonSta
 	let mut state = state.write().await;
 	if let Some(entry) = state.mounts.get_mut(app_id) {
 		entry.refcount = entry.refcount.saturating_sub(1);
+		entry.last_active = Instant::now();
 		if entry.refcount == 0 {
 			mount::unmount_overlay(&entry.rootfs)?;
 			state.mounts.remove(app_id);
+			return Ok(serde_json::json!({"status": "unmounted", "app_id": app_id}));
 		}
-		Ok(serde_json::json!({"status": "unmounted", "app_id": app_id}))
+		Ok(serde_json::json!({"status": "refcount_decremented", "app_id": app_id, "refcount": entry.refcount}))
 	} else {
 		Ok(serde_json::json!({"error": "not mounted", "app_id": app_id}))
 	}
@@ -277,8 +333,33 @@ async fn handle_list(state: &Arc<RwLock<DaemonState>>) -> anyhow::Result<serde_j
 				"app_id": id,
 				"rootfs": entry.rootfs.to_string_lossy(),
 				"refcount": entry.refcount,
+				"last_active_secs_ago": entry.last_active.elapsed().as_secs(),
 			})
 		})
 		.collect();
 	Ok(serde_json::json!({"mounts": mounts}))
+}
+
+fn base64_encode(data: &[u8]) -> String {
+	const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+	let mut out = String::new();
+	for chunk in data.chunks(3) {
+		let b0 = chunk[0] as u32;
+		let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
+		let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
+		let triple = (b0 << 16) | (b1 << 8) | b2;
+		out.push(CHARS[((triple >> 18) & 0x3F) as usize] as char);
+		out.push(CHARS[((triple >> 12) & 0x3F) as usize] as char);
+		if chunk.len() > 1 {
+			out.push(CHARS[((triple >> 6) & 0x3F) as usize] as char);
+		} else {
+			out.push('=');
+		}
+		if chunk.len() > 2 {
+			out.push(CHARS[(triple & 0x3F) as usize] as char);
+		} else {
+			out.push('=');
+		}
+	}
+	out
 }

@@ -1,3 +1,4 @@
+pub mod compat;
 pub mod export;
 pub mod gc;
 pub mod inspect;

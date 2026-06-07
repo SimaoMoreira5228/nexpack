@@ -2,6 +2,7 @@ pub mod error;
 pub mod header;
 pub mod layer;
 pub mod permission;
+pub mod sbom;
 pub mod signing;
 pub mod store;
 pub mod update;
@@ -11,7 +12,8 @@ pub use error::Error;
 pub use header::BundleHeader;
 pub use layer::LayerRef;
 pub use permission::PermissionSet;
-pub use signing::TrustConfig;
+pub use sbom::{generate_sbom, verify_sbom_data};
+pub use signing::{TrustConfig, verify_signature_opt, verify_with_identity_opt};
 pub use store::Store;
 pub use verify::Verifier;
 

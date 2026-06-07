@@ -16,3 +16,4 @@ tokio.workspace = true
 ciborium.workspace = true
 toml.workspace = true
 reqwest.workspace = true
+libc = "0.2"

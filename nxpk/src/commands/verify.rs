@@ -1,6 +1,6 @@
 use nexpack_core::Bundle;
 
-pub fn verify(bundle_path: &str) -> anyhow::Result<()> {
+pub fn verify(bundle_path: &str, offline: bool) -> anyhow::Result<()> {
 	let bundle = Bundle::open(bundle_path)?;
 
 	println!("Verifying: {}", bundle_path);
@@ -21,8 +21,11 @@ pub fn verify(bundle_path: &str) -> anyhow::Result<()> {
 	println!("\nAll layer digests verified successfully");
 
 	println!("\nSignature:");
-	match nexpack_core::signing::verify_signature(&bundle) {
-		Ok(()) => println!("  OK — Sigstore signature verified"),
+	match nexpack_core::signing::verify_signature_opt(&bundle, offline) {
+		Ok(()) => println!(
+			"  OK — Sigstore signature verified{}",
+			if offline { " (offline mode)" } else { "" }
+		),
 		Err(e) => {
 			println!("  NONE — {}", e);
 		}
