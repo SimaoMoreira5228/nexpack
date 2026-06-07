@@ -30,7 +30,10 @@ pub fn run(bundle_path: &str, args: &[String], sandbox: Option<bool>, offline: b
 	let socket_path = std::path::PathBuf::from(&runtime_dir).join("nexpack.sock");
 
 	if !socket_path.exists() {
-		anyhow::bail!("nexpackd not running. Start with: nexpackd &");
+		eprintln!("nexpackd not running, starting it...");
+		start_daemon()?;
+		wait_for_socket(&socket_path, std::time::Duration::from_secs(5))
+			.map_err(|_| anyhow::anyhow!("nexpackd failed to start within 5 seconds. Try: nexpackd &"))?;
 	}
 
 	let request = serde_json::json!({
@@ -184,4 +187,52 @@ fn send_ipc(socket_path: &std::path::Path, request: &serde_json::Value) -> anyho
 	reader.read_line(&mut line)?;
 
 	Ok(serde_json::from_str(&line)?)
+}
+
+fn start_daemon() -> anyhow::Result<()> {
+	let nexpackd_path = find_nexpackd_in_path()?;
+
+	let mut cmd = Command::new(&nexpackd_path);
+	cmd.stdout(std::process::Stdio::null());
+	cmd.stderr(std::process::Stdio::null());
+	cmd.stdin(std::process::Stdio::null());
+
+	unsafe {
+		cmd.pre_exec(|| {
+			libc::setsid();
+			Ok(())
+		});
+	}
+
+	cmd.spawn().map_err(|e| anyhow::anyhow!("failed to start nexpackd: {}", e))?;
+	Ok(())
+}
+
+fn wait_for_socket(path: &std::path::Path, timeout: std::time::Duration) -> anyhow::Result<()> {
+	let start = std::time::Instant::now();
+	while start.elapsed() < timeout {
+		if path.exists() {
+			return Ok(());
+		}
+		std::thread::sleep(std::time::Duration::from_millis(100));
+	}
+	anyhow::bail!("socket not ready after {:?}", timeout)
+}
+
+fn find_nexpackd_in_path() -> anyhow::Result<String> {
+	for dir in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()) {
+		let candidate = dir.join("nexpackd");
+		if candidate.is_file() {
+			return Ok(candidate.to_string_lossy().to_string());
+		}
+	}
+	if let Ok(exe) = std::env::current_exe() {
+		if let Some(parent) = exe.parent() {
+			let sibling = parent.join("nexpackd");
+			if sibling.is_file() {
+				return Ok(sibling.to_string_lossy().to_string());
+			}
+		}
+	}
+	anyhow::bail!("nexpackd not found in PATH or next to nxpk binary. Start it manually: nexpackd &")
 }

@@ -294,7 +294,22 @@ void _start(void)
                     (unsigned long)&((struct sockaddr_un *)0)->sun_path
                     + i + 1) < 0) {
         sys_close((int)sock);
-        const char m[] = "nexpack: daemon not available. Run: nexpackd &\n";
+
+        char nxpk_bin[MAX_ARG_LEN] = {0};
+        if (find_in_path("nxpk", nxpk_bin, sizeof(nxpk_bin), envp) == 0) {
+            char *fallback_argv[MAX_ARGS + 3];
+            int fi = 0;
+            fallback_argv[fi++] = nxpk_bin;
+            fallback_argv[fi++] = "run";
+            fallback_argv[fi++] = (char *)self_path;
+            for (int j = 1; j < argc && fi < MAX_ARGS + 2; j++) {
+                fallback_argv[fi++] = argv[j];
+            }
+            fallback_argv[fi] = 0;
+            sys_execve(nxpk_bin, fallback_argv, envp);
+        }
+
+        const char m[] = "nexpack: daemon not available. Install nxpk or run: nexpackd &\n";
         sys_write(2, m, str_len(m));
         sys_exit(1);
     }
