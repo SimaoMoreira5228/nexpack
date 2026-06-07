@@ -1,5 +1,5 @@
 use nexpack_core::{Bundle, Verifier};
-use std::os::unix::io::AsRawFd;
+use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 
@@ -36,55 +36,70 @@ pub fn run(bundle_path: &str, args: &[String], sandbox: Option<bool>, offline: b
 			.map_err(|_| anyhow::anyhow!("nexpackd failed to start within 5 seconds. Try: nexpackd &"))?;
 	}
 
-	let request = serde_json::json!({
-		"method": "mount",
-		"bundle": bundle_path,
-		"offline": offline,
-	});
+	let stream = std::os::unix::net::UnixStream::connect(&socket_path)
+		.map_err(|_| anyhow::anyhow!("failed to connect to nexpackd at {}", socket_path.display()))?;
+	let mut reader = std::io::BufReader::new(&stream);
+	let mut writer = &stream;
 
-	let response = send_ipc(&socket_path, &request)?;
-
-	let status = response.get("status").and_then(|v| v.as_str()).unwrap_or("error");
-	if status != "mounted" {
-		anyhow::bail!("daemon mount failed: {}", response);
+	{
+		let mut msg = capnp::message::Builder::new_default();
+		let mut req = msg.init_root::<nexpack_ipc::ipc_capnp::request::Builder>();
+		let mut mount_req = req.init_mount();
+		mount_req.set_bundle(bundle_path);
+		mount_req.set_offline(offline);
+		capnp::serialize::write_message(&mut writer, &msg)?;
 	}
 
-	let rootfs = response
-		.get("rootfs")
-		.and_then(|v| v.as_str())
-		.ok_or_else(|| anyhow::anyhow!("no rootfs in response"))?;
+	let response_reader = capnp::serialize::read_message(&mut reader, capnp::message::ReaderOptions::default())?;
+	let response = response_reader.get_root::<nexpack_ipc::ipc_capnp::response::Reader>()?;
 
+	let mount_resp = match response.which()? {
+		nexpack_ipc::ipc_capnp::response::Mount(m) => m?,
+		nexpack_ipc::ipc_capnp::response::Error(e) => anyhow::bail!("daemon error: {}", e?.get_message()?.to_str()?),
+		_ => anyhow::bail!("unexpected daemon response"),
+	};
+
+	let status = mount_resp.get_status()?.to_str()?;
+	if status != "mounted" {
+		anyhow::bail!("daemon mount failed: {}", status);
+	}
+
+	let rootfs = mount_resp.get_rootfs()?.to_str()?;
 	let entrypoint = bundle.header.entrypoint.clone();
 
-	let use_sandbox = sandbox.unwrap_or_else(|| response.get("bwrap_args").is_some());
+	let bwrap_args_val: Vec<String> = mount_resp
+		.get_bwrap_args()?
+		.iter()
+		.filter_map(|s| s.ok())
+		.flat_map(|s| s.to_str())
+		.map(|s| s.to_string())
+		.collect();
+
+	let seccomp_filter_data = mount_resp.get_seccomp_filter()?.to_vec();
+
+	let use_sandbox = sandbox.unwrap_or_else(|| !bwrap_args_val.is_empty());
 
 	if use_sandbox {
-		let bwrap_args_val = response
-			.get("bwrap_args")
-			.and_then(|v| v.as_array())
-			.ok_or_else(|| anyhow::anyhow!("daemon did not provide sandbox args. Use --no-sandbox to run unsandboxed."))?;
-
 		eprintln!("Launching sandboxed: {} (via bwrap)", entrypoint);
 
 		let bwrap_path = find_bwrap()?;
 		let mut cmd = Command::new(&bwrap_path);
 
 		let mut seccomp_fd: Option<i32> = None;
-		if let Some(filter_b64) = response.get("seccomp_filter").and_then(|v| v.as_str()) {
-			seccomp_fd = Some(setup_seccomp_fd(filter_b64)?);
+		if !seccomp_filter_data.is_empty() {
+			seccomp_fd = Some(setup_seccomp_fd(&seccomp_filter_data)?);
 		}
 
 		let mut seccomp_inserted = false;
-		for arg in bwrap_args_val {
-			let s = arg.as_str().unwrap_or_default();
-			if s == "--" && !seccomp_inserted {
+		for arg in &bwrap_args_val {
+			if arg == "--" && !seccomp_inserted {
 				if let Some(fd) = seccomp_fd {
 					cmd.arg("--seccomp");
 					cmd.arg(fd.to_string());
 				}
 				seccomp_inserted = true;
 			}
-			cmd.arg(s);
+			cmd.arg(&arg);
 		}
 
 		for a in args {
@@ -104,11 +119,9 @@ pub fn run(bundle_path: &str, args: &[String], sandbox: Option<bool>, offline: b
 	Ok(())
 }
 
-fn setup_seccomp_fd(filter_b64: &str) -> anyhow::Result<i32> {
-	let filter = base64_decode(filter_b64)?;
-
+fn setup_seccomp_fd(filter: &[u8]) -> anyhow::Result<i32> {
 	let tmp_path = std::env::temp_dir().join(format!("nexpack-seccomp-{}", std::process::id()));
-	std::fs::write(&tmp_path, &filter)?;
+	std::fs::write(&tmp_path, filter)?;
 	let file = std::fs::File::open(&tmp_path)?;
 	let _ = std::fs::remove_file(&tmp_path);
 
@@ -126,43 +139,6 @@ fn setup_seccomp_fd(filter_b64: &str) -> anyhow::Result<i32> {
 	Ok(fd)
 }
 
-fn base64_decode(input: &str) -> anyhow::Result<Vec<u8>> {
-	const DECODE: [i8; 256] = {
-		let mut table = [-1i8; 256];
-		let chars = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-		let mut i = 0;
-		while i < chars.len() {
-			table[chars[i] as usize] = i as i8;
-			i += 1;
-		}
-		table
-	};
-
-	let bytes: Vec<u8> = input.bytes().filter(|&b| b != b'=' && b != b'\n').collect();
-	let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
-	for chunk in bytes.chunks(4) {
-		if chunk.len() < 4 {
-			break;
-		}
-		let a = DECODE[chunk[0] as usize];
-		let b = DECODE[chunk[1] as usize];
-		let c = DECODE[chunk[2] as usize];
-		let d = DECODE[chunk[3] as usize];
-		if a < 0 || b < 0 || c < 0 || d < 0 {
-			anyhow::bail!("invalid base64 character");
-		}
-		let triple = ((a as u32) << 18) | ((b as u32) << 12) | ((c as u32) << 6) | (d as u32);
-		out.push((triple >> 16) as u8);
-		if chunk.len() > 2 {
-			out.push((triple >> 8) as u8);
-		}
-		if chunk.len() > 3 {
-			out.push(triple as u8);
-		}
-	}
-	Ok(out)
-}
-
 fn find_bwrap() -> anyhow::Result<String> {
 	for dir in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()) {
 		let candidate = dir.join("bwrap");
@@ -171,22 +147,6 @@ fn find_bwrap() -> anyhow::Result<String> {
 		}
 	}
 	anyhow::bail!("bwrap not found in PATH. Install bubblewrap.")
-}
-
-fn send_ipc(socket_path: &std::path::Path, request: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
-	use std::io::{BufRead, Write};
-	use std::os::unix::net::UnixStream;
-
-	let mut stream = UnixStream::connect(socket_path)?;
-	let mut req_str = serde_json::to_string(request)?;
-	req_str.push('\n');
-	stream.write_all(req_str.as_bytes())?;
-
-	let mut reader = std::io::BufReader::new(stream);
-	let mut line = String::new();
-	reader.read_line(&mut line)?;
-
-	Ok(serde_json::from_str(&line)?)
 }
 
 fn start_daemon() -> anyhow::Result<()> {

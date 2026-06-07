@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 nexpack-core = { path = "../nexpack-core" }
+nexpack-ipc = { path = "../nexpack-ipc" }
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -17,3 +18,4 @@ ciborium.workspace = true
 toml.workspace = true
 reqwest.workspace = true
 libc = "0.2"
+capnp.workspace = true

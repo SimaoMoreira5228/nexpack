@@ -215,6 +215,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
+name = "capnp"
+version = "0.25.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1cfd2485d4b36ac9c5aa6572d7d35daa63a5b34f517627d6c34d068e616e4a73"
+dependencies = [
+ "embedded-io",
+]
+
+[[package]]
+name = "capnpc"
+version = "0.25.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fca02be865c8c5a78bfc24b9819006ab6b59bef238467203928e26459557af93"
+dependencies = [
+ "capnp",
+]
+
+[[package]]
 name = "cc"
 version = "1.2.62"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -538,6 +556,12 @@ name = "dyn-clone"
 version = "1.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
+
+[[package]]
+name = "embedded-io"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9eb1aa714776b75c7e67e1da744b81a129b3ff919c8712b5e1b32252c1f07cc7"
 
 [[package]]
 name = "encoding_rs"
@@ -1328,12 +1352,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "nexpack-ipc"
+version = "0.1.0"
+dependencies = [
+ "capnp",
+ "capnpc",
+]
+
+[[package]]
 name = "nexpackd"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "capnp",
  "ciborium",
  "nexpack-core",
+ "nexpack-ipc",
  "reqwest 0.13.4",
  "serde",
  "serde_json",
@@ -1365,10 +1399,12 @@ name = "nxpk"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "capnp",
  "ciborium",
  "clap",
  "libc",
  "nexpack-core",
+ "nexpack-ipc",
  "reqwest 0.13.4",
  "serde",
  "serde_json",

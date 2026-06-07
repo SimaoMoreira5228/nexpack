@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::RwLock;
 
@@ -222,39 +221,91 @@ async fn idle_mount_cleaner(state: Arc<RwLock<DaemonState>>) {
 	}
 }
 
-async fn handle_client(mut stream: UnixStream, state: Arc<RwLock<DaemonState>>) -> anyhow::Result<()> {
-	let (reader, mut writer) = stream.split();
-	let mut buf_reader = BufReader::new(reader);
-	let mut line = String::new();
-	buf_reader.read_line(&mut line).await?;
-	let line = line.trim();
+async fn handle_client(stream: UnixStream, state: Arc<RwLock<DaemonState>>) -> anyhow::Result<()> {
+	let mut std_stream = stream.into_std()?;
+	let mut reader = std::io::BufReader::new(&std_stream);
+	let mut writer = &std_stream;
 
-	let request: serde_json::Value = serde_json::from_str(line)?;
-	let method = request.get("method").and_then(|v| v.as_str()).unwrap_or("");
+	let request_reader = capnp::serialize::read_message(&mut reader, capnp::message::ReaderOptions::default())?;
+	let request = request_reader.get_root::<nexpack_ipc::ipc_capnp::request::Reader>()?;
 
-	let response = match method {
-		"mount" => handle_mount(request, &state).await,
-		"unmount" => handle_unmount(request, &state).await,
-		"list" => handle_list(&state).await,
-		"status" => Ok(serde_json::json!({"status": "ok", "version": "0.1.0"})),
-		_ => Ok(serde_json::json!({"error": format!("unknown method: {}", method)})),
+	enum RequestKind {
+		Mount { bundle: String, offline: bool },
+		Unmount { app_id: String },
+		List,
+		Status,
+	}
+
+	let kind = match request.which()? {
+		nexpack_ipc::ipc_capnp::request::Mount(m) => {
+			let m = m?;
+			RequestKind::Mount {
+				bundle: m.get_bundle()?.to_str()?.to_string(),
+				offline: m.get_offline(),
+			}
+		}
+		nexpack_ipc::ipc_capnp::request::Unmount(u) => {
+			let u = u?;
+			RequestKind::Unmount {
+				app_id: u.get_app_id()?.to_str()?.to_string(),
+			}
+		}
+		nexpack_ipc::ipc_capnp::request::List(_) => RequestKind::List,
+		nexpack_ipc::ipc_capnp::request::Status(_) => RequestKind::Status,
 	};
 
-	let mut resp = serde_json::to_string(&response?)?;
-	resp.push('\n');
-	writer.write_all(resp.as_bytes()).await?;
+	drop(request_reader);
+
+	let mut write_error = |e: &anyhow::Error| -> anyhow::Result<()> {
+		let mut msg = capnp::message::Builder::new_default();
+		{
+			let mut resp = msg.init_root::<nexpack_ipc::ipc_capnp::response::Builder>();
+			let mut err = resp.init_error();
+			err.set_message(&e.to_string());
+		}
+		capnp::serialize::write_message(&mut writer, &msg)?;
+		Ok(())
+	};
+
+	match kind {
+		RequestKind::Mount { bundle, offline } => {
+			match handle_mount(&bundle, offline, &state).await {
+				Ok(msg) => capnp::serialize::write_message(&mut writer, &msg)?,
+				Err(e) => write_error(&e)?,
+			}
+		}
+		RequestKind::Unmount { app_id } => {
+			match handle_unmount(&app_id, &state).await {
+				Ok(msg) => capnp::serialize::write_message(&mut writer, &msg)?,
+				Err(e) => write_error(&e)?,
+			}
+		}
+		RequestKind::List => {
+			match handle_list(&state).await {
+				Ok(msg) => capnp::serialize::write_message(&mut writer, &msg)?,
+				Err(e) => write_error(&e)?,
+			}
+		}
+		RequestKind::Status => {
+			let mut msg = capnp::message::Builder::new_default();
+			{
+				let mut resp = msg.init_root::<nexpack_ipc::ipc_capnp::response::Builder>();
+				let mut status = resp.init_status();
+				status.set_version("0.1.0");
+				status.set_uptime_seconds(0.0);
+			}
+			capnp::serialize::write_message(&mut writer, &msg)?;
+		}
+	}
 
 	Ok(())
 }
 
-async fn handle_mount(request: serde_json::Value, state: &Arc<RwLock<DaemonState>>) -> anyhow::Result<serde_json::Value> {
-	let bundle_path = request
-		.get("bundle")
-		.and_then(|v| v.as_str())
-		.ok_or_else(|| anyhow::anyhow!("missing 'bundle' field"))?;
-
-	let offline = request.get("offline").and_then(|v| v.as_bool()).unwrap_or(false);
-
+async fn handle_mount(
+	bundle_path: &str,
+	offline: bool,
+	state: &Arc<RwLock<DaemonState>>,
+) -> anyhow::Result<capnp::message::Builder<capnp::message::HeapAllocator>> {
 	let bundle = Bundle::open(bundle_path)?;
 	let app_id = bundle.header.app_id.clone();
 
@@ -290,76 +341,70 @@ async fn handle_mount(request: serde_json::Value, state: &Arc<RwLock<DaemonState
 	entry.last_active = Instant::now();
 
 	let seccomp_filter = sandbox::generate_seccomp_filter(&bundle.header.permissions);
-	let seccomp_b64 = base64_encode(&seccomp_filter);
 
-	Ok(serde_json::json!({
-		"status": "mounted",
-		"app_id": app_id,
-		"rootfs": merged.to_string_lossy(),
-		"entrypoint": entrypoint,
-		"bwrap_args": bwrap_args,
-		"seccomp_filter": seccomp_b64,
-	}))
+	let mut msg = capnp::message::Builder::new_default();
+	{
+		let mut resp = msg.init_root::<nexpack_ipc::ipc_capnp::response::Builder>();
+		let mut mount_resp = resp.init_mount();
+		mount_resp.set_status("mounted");
+		mount_resp.set_app_id(&app_id);
+		mount_resp.set_rootfs(&merged.to_string_lossy());
+		mount_resp.set_entrypoint(&entrypoint);
+		mount_resp.set_seccomp_filter(&seccomp_filter);
+
+		let mut args = mount_resp.init_bwrap_args(bwrap_args.len() as u32);
+		for (i, arg) in bwrap_args.iter().enumerate() {
+			args.set(i as u32, arg);
+		}
+	}
+
+	Ok(msg)
 }
 
-async fn handle_unmount(request: serde_json::Value, state: &Arc<RwLock<DaemonState>>) -> anyhow::Result<serde_json::Value> {
-	let app_id = request
-		.get("app_id")
-		.and_then(|v| v.as_str())
-		.ok_or_else(|| anyhow::anyhow!("missing 'app_id' field"))?;
-
+async fn handle_unmount(
+	app_id: &str,
+	state: &Arc<RwLock<DaemonState>>,
+) -> anyhow::Result<capnp::message::Builder<capnp::message::HeapAllocator>> {
 	let mut state = state.write().await;
-	if let Some(entry) = state.mounts.get_mut(app_id) {
-		entry.refcount = entry.refcount.saturating_sub(1);
-		entry.last_active = Instant::now();
-		if entry.refcount == 0 {
-			mount::unmount_overlay(&entry.rootfs)?;
-			state.mounts.remove(app_id);
-			return Ok(serde_json::json!({"status": "unmounted", "app_id": app_id}));
+	let mut msg = capnp::message::Builder::new_default();
+	{
+		let mut resp = msg.init_root::<nexpack_ipc::ipc_capnp::response::Builder>();
+
+		if let Some(entry) = state.mounts.get_mut(app_id) {
+			entry.refcount = entry.refcount.saturating_sub(1);
+			entry.last_active = Instant::now();
+			if entry.refcount == 0 {
+				mount::unmount_overlay(&entry.rootfs)?;
+				state.mounts.remove(app_id);
+				let mut u = resp.init_unmount();
+				u.set_status("unmounted");
+			} else {
+				let mut u = resp.init_unmount();
+				u.set_status("refcount_decremented");
+			}
+		} else {
+			let mut err = resp.init_error();
+			err.set_message("not mounted");
 		}
-		Ok(serde_json::json!({"status": "refcount_decremented", "app_id": app_id, "refcount": entry.refcount}))
-	} else {
-		Ok(serde_json::json!({"error": "not mounted", "app_id": app_id}))
 	}
+	Ok(msg)
 }
 
-async fn handle_list(state: &Arc<RwLock<DaemonState>>) -> anyhow::Result<serde_json::Value> {
+async fn handle_list(
+	state: &Arc<RwLock<DaemonState>>,
+) -> anyhow::Result<capnp::message::Builder<capnp::message::HeapAllocator>> {
 	let state = state.read().await;
-	let mounts: Vec<serde_json::Value> = state
-		.mounts
-		.iter()
-		.map(|(id, entry)| {
-			serde_json::json!({
-				"app_id": id,
-				"rootfs": entry.rootfs.to_string_lossy(),
-				"refcount": entry.refcount,
-				"last_active_secs_ago": entry.last_active.elapsed().as_secs(),
-			})
-		})
-		.collect();
-	Ok(serde_json::json!({"mounts": mounts}))
-}
-
-fn base64_encode(data: &[u8]) -> String {
-	const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-	let mut out = String::new();
-	for chunk in data.chunks(3) {
-		let b0 = chunk[0] as u32;
-		let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
-		let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
-		let triple = (b0 << 16) | (b1 << 8) | b2;
-		out.push(CHARS[((triple >> 18) & 0x3F) as usize] as char);
-		out.push(CHARS[((triple >> 12) & 0x3F) as usize] as char);
-		if chunk.len() > 1 {
-			out.push(CHARS[((triple >> 6) & 0x3F) as usize] as char);
-		} else {
-			out.push('=');
-		}
-		if chunk.len() > 2 {
-			out.push(CHARS[(triple & 0x3F) as usize] as char);
-		} else {
-			out.push('=');
+	let mut msg = capnp::message::Builder::new_default();
+	{
+		let mut resp = msg.init_root::<nexpack_ipc::ipc_capnp::response::Builder>();
+		let mut list_resp = resp.init_list();
+		let mut apps = list_resp.init_apps(state.mounts.len() as u32);
+		for (i, (id, entry)) in state.mounts.iter().enumerate() {
+			let mut app_info = apps.reborrow().get(i as u32);
+			app_info.set_app_id(id);
+			app_info.set_rootfs(&entry.rootfs.to_string_lossy());
+			app_info.set_entrypoint("");
 		}
 	}
-	out
+	Ok(msg)
 }

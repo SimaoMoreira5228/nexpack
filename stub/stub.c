@@ -139,20 +139,6 @@ static int read_all(int fd, char *buf, unsigned long len)
     return 0;
 }
 
-static int read_line(int fd, char *buf, unsigned long bufsz)
-{
-    unsigned long i = 0;
-    while (i < bufsz - 1) {
-        char c;
-        long n = sys_read(fd, &c, 1);
-        if (n <= 0) break;
-        if (c == '\n') break;
-        buf[i++] = c;
-    }
-    buf[i] = '\0';
-    return (int)i;
-}
-
 static unsigned long str_len(const char *s)
 {
     unsigned long n = 0;
@@ -191,98 +177,6 @@ static const char *env_get(char *envp[], const char *name)
             return e + j + 1;
         }
     }
-    return 0;
-}
-
-static const char *json_str_val(const char *json, const char *key)
-{
-    unsigned long key_len = str_len(key);
-    const char *p = json;
-    while (*p) {
-        if (*p == '"') {
-            p++;
-            unsigned long j;
-            for (j = 0; j < key_len && p[j] && p[j] == key[j]; j++);
-            if (j == key_len && p[j] == '"') {
-                p += j;
-                if (p[0] == '"' && p[1] == ':') {
-                    p += 2;
-                    while (*p == ' ' || *p == '\t') p++;
-                    if (*p == '"') {
-                        return p + 1;
-                    }
-                }
-            }
-        }
-        p++;
-    }
-    return 0;
-}
-
-static int read_json_str(const char *start, char *out, int max)
-{
-    int i = 0;
-    while (start[i] && start[i] != '"' && i < max - 1) {
-        out[i] = start[i];
-        i++;
-    }
-    out[i] = '\0';
-    return i;
-}
-
-static const char *json_arr_val(const char *json, const char *key)
-{
-    unsigned long key_len = str_len(key);
-    const char *p = json;
-    while (*p) {
-        if (*p == '"') {
-            p++;
-            unsigned long j;
-            for (j = 0; j < key_len && p[j] && p[j] == key[j]; j++);
-            if (j == key_len && p[j] == '"') {
-                p += j;
-                if (p[0] == '"' && p[1] == ':') {
-                    p += 2;
-                    while (*p == ' ' || *p == '\t') p++;
-                    if (*p == '[') {
-                        return p + 1;
-                    }
-                }
-            }
-        }
-        p++;
-    }
-    return 0;
-}
-
-static int read_arr_string(const char **pp, char *out, int max)
-{
-    const char *p = *pp;
-    while (*p == ' ' || *p == '\t' || *p == '\n') p++;
-    if (*p != '"') return -1;
-    p++;
-    int i = 0;
-    while (*p && *p != '"' && i < max - 1) {
-        if (*p == '\\') {
-            p++;
-            if (*p) {
-                out[i++] = *p;
-                p++;
-            }
-        } else {
-            out[i++] = *p;
-            p++;
-        }
-    }
-    if (*p != '"') return -1;
-    out[i] = '\0';
-    p++;
-    while (*p == ' ' || *p == '\t' || *p == '\n') p++;
-    if (*p == ',') {
-        p++;
-        while (*p == ' ' || *p == '\t' || *p == '\n') p++;
-    }
-    *pp = p;
     return 0;
 }
 
@@ -570,97 +464,32 @@ void _start(void)
         }
     }
 
-    char request[BUF_SIZE];
-    unsigned long pos = 0;
+    if (sock >= 0) {
+        sys_close((int)sock);
+    }
+
     {
-        const char *p = "{\"method\":\"mount\",\"bundle\":\"";
-        while (*p && pos < BUF_SIZE - 3) {
-            request[pos++] = *p++;
-        }
-
-        const char *p2 = self_path;
-        while (*p2 && pos < BUF_SIZE - 3) {
-            if (*p2 == '"' || *p2 == '\\')
-                request[pos++] = '\\';
-            request[pos++] = *p2++;
-        }
-        request[pos++] = '"';
-        request[pos++] = '}';
-        request[pos++] = '\n';
-    }
-
-    if (write_all((int)sock, request, pos) < 0) {
-        sys_close((int)sock);
-        sys_exit(1);
-    }
-
-    char response[BUF_SIZE];
-    if (read_line((int)sock, response, BUF_SIZE) < 0) {
-        sys_close((int)sock);
-        sys_exit(1);
-    }
-
-    sys_close((int)sock);
-
-    char bwrap_bin[MAX_ARG_LEN] = {0};
-    char bwrap_args_buf[MAX_ARGS][MAX_ARG_LEN];
-    char *bwrap_argv[MAX_ARGS + 1];
-    int nargs = 0;
-
-    const char *arr_start = json_arr_val(response, "bwrap_args");
-    if (arr_start) {
-        const char *p = arr_start;
-        while (*p != ']' && *p != '\0' && nargs < MAX_ARGS) {
-            if (read_arr_string(&p, bwrap_args_buf[nargs], MAX_ARG_LEN) == 0) {
-                bwrap_argv[nargs] = bwrap_args_buf[nargs];
-                nargs++;
-            } else {
-                break;
+        char nxpk_bin[MAX_ARG_LEN] = {0};
+        if (find_in_path("nxpk", nxpk_bin, sizeof(nxpk_bin), envp) == 0) {
+            char *fallback_argv[MAX_ARGS + 3];
+            int fi = 0;
+            fallback_argv[fi++] = nxpk_bin;
+            fallback_argv[fi++] = "run";
+            fallback_argv[fi++] = (char *)self_path;
+            for (int j = 1; j < argc && fi < MAX_ARGS + 2; j++) {
+                fallback_argv[fi++] = argv[j];
             }
+            fallback_argv[fi] = 0;
+            sys_execve(nxpk_bin, fallback_argv, envp);
         }
-    }
-
-    if (nargs > 0) {
-        char *final_argv[MAX_ARGS + 2];
-        int ai = 0;
-
-        if (find_in_path("bwrap", bwrap_bin, sizeof(bwrap_bin), envp) != 0) {
-            const char m[] = "nexpack: bwrap not found in PATH\n";
+        if (try_bootstrap_and_start_daemon(self_path, envp) == 0) {
+            const char m[] = "nexpack: daemon started from bootstrap data. Run: nxpk run <bundle>\n";
             sys_write(2, m, str_len(m));
-            sys_exit(1);
+        } else {
+            const char m[] = "nexpack: daemon not available. Install nxpk or run: nexpackd &\n";
+            sys_write(2, m, str_len(m));
         }
-        final_argv[ai++] = bwrap_bin;
-
-        for (int j = 0; j < nargs; j++) {
-            final_argv[ai++] = bwrap_argv[j];
-        }
-
-        for (int j = 1; j < argc; j++) {
-            if (ai < MAX_ARGS + 1) {
-                final_argv[ai++] = argv[j];
-            }
-        }
-        final_argv[ai] = 0;
-
-        sys_execve(bwrap_bin, final_argv, envp);
-
-        const char m[] = "nexpack: exec bwrap failed\n";
-        sys_write(2, m, str_len(m));
         sys_exit(1);
-    }
-
-    char entrypoint[256] = {0};
-    const char *ep_val = json_str_val(response, "entrypoint");
-    if (ep_val) {
-        read_json_str(ep_val, entrypoint, sizeof(entrypoint));
-    }
-
-    if (entrypoint[0]) {
-        const char m1[] = "nexpack: ";
-        const char m2[] = " mounted, no sandbox args from daemon\n";
-        sys_write(2, m1, str_len(m1));
-        sys_write(2, entrypoint, str_len(entrypoint));
-        sys_write(2, m2, str_len(m2));
     }
 
     sys_exit(0);

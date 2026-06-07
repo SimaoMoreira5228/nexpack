@@ -4,6 +4,7 @@ members = [
     "nexpack-core",
     "nexpackd",
     "nxpk",
+    "nexpack-ipc",
 ]
 
 [workspace.package]
