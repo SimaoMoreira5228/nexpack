@@ -4,8 +4,10 @@
 #define SYS_write  1
 #define SYS_open   2
 #define SYS_close  3
+#define SYS_access 21
 #define SYS_socket 41
 #define SYS_connect 42
+#define SYS_execve 59
 #define SYS_exit   60
 #define SYS_exit_group 231
 
@@ -13,7 +15,8 @@
 #define SOCK_STREAM 1
 
 #define BUF_SIZE   4096
-#define PATH_MAX   4096
+#define MAX_ARGS   64
+#define MAX_ARG_LEN 256
 
 struct sockaddr_un {
     unsigned short sun_family;
@@ -56,6 +59,16 @@ static long sys_connect(int fd, const struct sockaddr_un *addr,
                          unsigned long addrlen)
 {
     return sys_call(SYS_connect, fd, (long)addr, addrlen);
+}
+
+static long sys_execve(const char *path, char *const argv[], char *const envp[])
+{
+    return sys_call(SYS_execve, (long)path, (long)argv, (long)envp);
+}
+
+static long sys_access(const char *path, int mode)
+{
+    return sys_call(SYS_access, (long)path, (long)mode, 0);
 }
 
 static void sys_exit(int code)
@@ -149,6 +162,90 @@ static int read_json_str(const char *start, char *out, int max)
     return i;
 }
 
+static const char *json_arr_val(const char *json, const char *key)
+{
+    unsigned long key_len = str_len(key);
+    const char *p = json;
+    while (*p) {
+        if (*p == '"') {
+            p++;
+            unsigned long j;
+            for (j = 0; j < key_len && p[j] && p[j] == key[j]; j++);
+            if (j == key_len && p[j] == '"') {
+                p += j;
+                if (p[0] == '"' && p[1] == ':') {
+                    p += 2;
+                    while (*p == ' ' || *p == '\t') p++;
+                    if (*p == '[') {
+                        return p + 1;
+                    }
+                }
+            }
+        }
+        p++;
+    }
+    return 0;
+}
+
+static int read_arr_string(const char **pp, char *out, int max)
+{
+    const char *p = *pp;
+    while (*p == ' ' || *p == '\t' || *p == '\n') p++;
+    if (*p != '"') return -1;
+    p++;
+    int i = 0;
+    while (*p && *p != '"' && i < max - 1) {
+        if (*p == '\\') {
+            p++;
+            if (*p) {
+                out[i++] = *p;
+                p++;
+            }
+        } else {
+            out[i++] = *p;
+            p++;
+        }
+    }
+    if (*p != '"') return -1;
+    out[i] = '\0';
+    p++;
+    while (*p == ' ' || *p == '\t' || *p == '\n') p++;
+    if (*p == ',') {
+        p++;
+        while (*p == ' ' || *p == '\t' || *p == '\n') p++;
+    }
+    *pp = p;
+    return 0;
+}
+
+static int find_in_path(const char *name, char *out, int max, char *envp[])
+{
+    const char *path_str = env_get(envp, "PATH");
+    if (!path_str) return -1;
+
+    const char *start = path_str;
+    const char *end;
+    while (*start) {
+        end = start;
+        while (*end && *end != ':') end++;
+
+        unsigned long dir_len = (unsigned long)(end - start);
+        unsigned long name_len = str_len(name);
+        if (dir_len + 1 + name_len + 1 < (unsigned long)max) {
+            unsigned long k;
+            for (k = 0; k < dir_len; k++) out[k] = start[k];
+            out[k++] = '/';
+            for (unsigned long m = 0; m < name_len; m++) out[k++] = name[m];
+            out[k] = '\0';
+            if (sys_access(out, 0) == 0) return 0;
+        }
+
+        if (*end == '\0') break;
+        start = end + 1;
+    }
+    return -1;
+}
+
 void _start(void)
 {
     unsigned long *sp;
@@ -234,15 +331,65 @@ void _start(void)
 
     sys_close((int)sock);
 
+    char bwrap_bin[MAX_ARG_LEN] = {0};
+    char bwrap_args_buf[MAX_ARGS][MAX_ARG_LEN];
+    char *bwrap_argv[MAX_ARGS + 1];
+    int nargs = 0;
+
+    const char *arr_start = json_arr_val(response, "bwrap_args");
+    if (arr_start) {
+        const char *p = arr_start;
+        while (*p != ']' && *p != '\0' && nargs < MAX_ARGS) {
+            if (read_arr_string(&p, bwrap_args_buf[nargs], MAX_ARG_LEN) == 0) {
+                bwrap_argv[nargs] = bwrap_args_buf[nargs];
+                nargs++;
+            } else {
+                break;
+            }
+        }
+    }
+
+    if (nargs > 0) {
+        char *final_argv[MAX_ARGS + 2];
+        int ai = 0;
+
+        if (find_in_path("bwrap", bwrap_bin, sizeof(bwrap_bin), envp) != 0) {
+            const char m[] = "nexpack: bwrap not found in PATH\n";
+            sys_write(2, m, str_len(m));
+            sys_exit(1);
+        }
+        final_argv[ai++] = bwrap_bin;
+
+        for (int j = 0; j < nargs; j++) {
+            final_argv[ai++] = bwrap_argv[j];
+        }
+
+        for (int j = 1; j < argc; j++) {
+            if (ai < MAX_ARGS + 1) {
+                final_argv[ai++] = argv[j];
+            }
+        }
+        final_argv[ai] = 0;
+
+        sys_execve(bwrap_bin, final_argv, envp);
+
+        const char m[] = "nexpack: exec bwrap failed\n";
+        sys_write(2, m, str_len(m));
+        sys_exit(1);
+    }
+
     char entrypoint[256] = {0};
     const char *ep_val = json_str_val(response, "entrypoint");
     if (ep_val) {
         read_json_str(ep_val, entrypoint, sizeof(entrypoint));
     }
 
-    // TODO: Exec bwrap with the mounted bundle as root, and --unshare-all for isolation
     if (entrypoint[0]) {
-        /* Would exec entrypoint; for now, signal success */
+        const char m1[] = "nexpack: ";
+        const char m2[] = " mounted, no sandbox args from daemon\n";
+        sys_write(2, m1, str_len(m1));
+        sys_write(2, entrypoint, str_len(entrypoint));
+        sys_write(2, m2, str_len(m2));
     }
 
     sys_exit(0);

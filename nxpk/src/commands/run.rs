@@ -66,19 +66,22 @@ pub fn run(bundle_path: &str, args: &[String], sandbox: Option<bool>, offline: b
 		let bwrap_path = find_bwrap()?;
 		let mut cmd = Command::new(&bwrap_path);
 
-		
 		let mut seccomp_fd: Option<i32> = None;
 		if let Some(filter_b64) = response.get("seccomp_filter").and_then(|v| v.as_str()) {
 			seccomp_fd = Some(setup_seccomp_fd(filter_b64)?);
 		}
 
+		let mut seccomp_inserted = false;
 		for arg in bwrap_args_val {
-			cmd.arg(arg.as_str().unwrap_or_default());
-		}
-
-		if let Some(fd) = seccomp_fd {
-			cmd.arg("--seccomp");
-			cmd.arg(fd.to_string());
+			let s = arg.as_str().unwrap_or_default();
+			if s == "--" && !seccomp_inserted {
+				if let Some(fd) = seccomp_fd {
+					cmd.arg("--seccomp");
+					cmd.arg(fd.to_string());
+				}
+				seccomp_inserted = true;
+			}
+			cmd.arg(s);
 		}
 
 		for a in args {
@@ -101,7 +104,6 @@ pub fn run(bundle_path: &str, args: &[String], sandbox: Option<bool>, offline: b
 fn setup_seccomp_fd(filter_b64: &str) -> anyhow::Result<i32> {
 	let filter = base64_decode(filter_b64)?;
 
-	
 	let tmp_path = std::env::temp_dir().join(format!("nexpack-seccomp-{}", std::process::id()));
 	std::fs::write(&tmp_path, &filter)?;
 	let file = std::fs::File::open(&tmp_path)?;
@@ -109,7 +111,6 @@ fn setup_seccomp_fd(filter_b64: &str) -> anyhow::Result<i32> {
 
 	let fd = file.as_raw_fd();
 
-	
 	unsafe {
 		let ret = libc::fcntl(fd, libc::F_SETFD, 0);
 		if ret < 0 {
@@ -117,14 +118,12 @@ fn setup_seccomp_fd(filter_b64: &str) -> anyhow::Result<i32> {
 		}
 	}
 
-	
 	std::mem::forget(file);
 
 	Ok(fd)
 }
 
 fn base64_decode(input: &str) -> anyhow::Result<Vec<u8>> {
-	
 	const DECODE: [i8; 256] = {
 		let mut table = [-1i8; 256];
 		let chars = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
