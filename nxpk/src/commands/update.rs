@@ -1,4 +1,5 @@
 use nexpack_core::{Store, Verifier};
+use std::io::Read;
 
 pub fn update(app_id: Option<&str>, all: bool) -> anyhow::Result<()> {
 	if all {
@@ -44,9 +45,7 @@ fn check_and_apply_updates(app_id: &str) -> anyhow::Result<()> {
 
 	println!("{}: checking {}...", app_id, update_url);
 
-	let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-
-	let feed = rt.block_on(fetch_feed(&update_url))?;
+	let feed: nexpack_core::update::UpdateFeed = fetch_feed(&update_url)?;
 
 	if feed.app_id != app_id {
 		anyhow::bail!("feed app_id '{}' doesn't match installed app '{}'", feed.app_id, app_id);
@@ -73,7 +72,7 @@ fn check_and_apply_updates(app_id: &str) -> anyhow::Result<()> {
 			let hex = layer.digest.strip_prefix("blake3:").unwrap_or(&layer.digest);
 			println!("    downloading layer {} ({})", &hex[..16], format_size(layer.size));
 
-			let data = rt.block_on(download_layer(&layer.url))?;
+			let data = download_layer(&layer.url)?;
 
 			if data.len() as u64 != layer.size {
 				anyhow::bail!("size mismatch for {}: expected {}, got {}", hex, layer.size, data.len());
@@ -120,35 +119,37 @@ fn check_and_apply_updates(app_id: &str) -> anyhow::Result<()> {
 	Ok(())
 }
 
-async fn fetch_feed(url: &str) -> anyhow::Result<nexpack_core::update::UpdateFeed> {
-	let resp = reqwest::get(url)
-		.await
+fn fetch_feed(url: &str) -> anyhow::Result<nexpack_core::update::UpdateFeed> {
+	let resp = ureq::get(url)
+		.call()
 		.map_err(|e| anyhow::anyhow!("fetching update feed: {}", e))?;
 
-	if !resp.status().is_success() {
+	if resp.status() != 200 {
 		anyhow::bail!("HTTP {} fetching {}", resp.status(), url);
 	}
 
 	let feed: nexpack_core::update::UpdateFeed = resp
-		.json()
-		.await
+		.into_json()
 		.map_err(|e| anyhow::anyhow!("parsing feed from {}: {}", url, e))?;
 
 	Ok(feed)
 }
 
-async fn download_layer(url: &str) -> anyhow::Result<Vec<u8>> {
-	let resp = reqwest::get(url)
-		.await
+fn download_layer(url: &str) -> anyhow::Result<Vec<u8>> {
+	let resp = ureq::get(url)
+		.call()
 		.map_err(|e| anyhow::anyhow!("downloading {}: {}", url, e))?;
 
-	if !resp.status().is_success() {
+	if resp.status() != 200 {
 		anyhow::bail!("HTTP {} downloading {}", resp.status(), url);
 	}
 
-	let data = resp.bytes().await.map_err(|e| anyhow::anyhow!("reading {}: {}", url, e))?;
+	let mut data = Vec::new();
+	resp.into_reader()
+		.read_to_end(&mut data)
+		.map_err(|e| anyhow::anyhow!("reading {}: {}", url, e))?;
 
-	Ok(data.to_vec())
+	Ok(data)
 }
 
 fn format_size(size: u64) -> String {

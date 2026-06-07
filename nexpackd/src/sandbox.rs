@@ -25,13 +25,11 @@ pub fn build_bwrap_args(rootfs: &str, perm: &PermissionSet, entrypoint: &str, ap
 		args.push(expanded.into());
 	}
 
-	
 	args.push("--unshare-pid".into());
 	args.push("--unshare-uts".into());
 	args.push("--unshare-ipc".into());
 	args.push("--die-with-parent".into());
 
-	
 	args.push("--unshare-user".into());
 	args.push("--uid".into());
 	args.push("0".into());
@@ -101,7 +99,6 @@ pub fn build_bwrap_args(rootfs: &str, perm: &PermissionSet, entrypoint: &str, ap
 		}
 	}
 
-	
 	if let Ok(runtime) = std::env::var("XDG_RUNTIME_DIR") {
 		let portal_path = format!("{}/doc/by-app", runtime);
 		if std::path::Path::new(&portal_path).exists() {
@@ -154,7 +151,6 @@ pub fn generate_seccomp_filter(perm: &PermissionSet) -> Vec<u8> {
 	};
 
 	if has_network {
-		
 		return seccomp_allow_all();
 	}
 
@@ -163,52 +159,29 @@ pub fn generate_seccomp_filter(perm: &PermissionSet) -> Vec<u8> {
 
 fn seccomp_allow_all() -> Vec<u8> {
 	let mut prog = Vec::new();
-	
+
 	prog.extend_from_slice(&bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW));
 	prog
 }
 
 fn block_network_syscalls() -> Vec<u8> {
-	
-	const BLACKLIST: &[u32] = &[
-		41,  
-		42,  
-		43,  
-		44,  
-		45,  
-		46,  
-		47,  
-		48,  
-		49,  
-		50,  
-		51,  
-		52,  
-		53,  
-		54,  
-		57,  
-		288, 
-	];
+	const BLACKLIST: &[u32] = &[41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 57, 288];
 
 	let mut prog = Vec::new();
 
-	
 	prog.extend_from_slice(&bpf_stmt(BPF_LD | BPF_W | BPF_ABS, 4));
 
-	
 	prog.extend_from_slice(&bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_X86_64, 0, 1));
-	
+
 	prog.extend_from_slice(&bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_KILL));
 
-	
 	prog.extend_from_slice(&bpf_stmt(BPF_LD | BPF_W | BPF_ABS, 0));
 
-	
 	for &sysno in BLACKLIST {
 		prog.extend_from_slice(&bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, sysno, 0, 1));
 		prog.extend_from_slice(&bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_KILL));
 	}
 
-	
 	prog.extend_from_slice(&bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW));
 
 	prog
@@ -230,8 +203,8 @@ const AUDIT_ARCH_X86_64: u32 = 0xC000003Eu32;
 fn bpf_stmt(code: u16, k: u32) -> [u8; 8] {
 	let mut buf = [0u8; 8];
 	buf[0..2].copy_from_slice(&code.to_le_bytes());
-	buf[2] = 0; 
-	buf[3] = 0; 
+	buf[2] = 0;
+	buf[3] = 0;
 	buf[4..8].copy_from_slice(&k.to_le_bytes());
 	buf
 }

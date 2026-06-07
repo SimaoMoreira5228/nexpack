@@ -29,8 +29,8 @@ pub fn search(query: &str) -> anyhow::Result<()> {
 	if let Some(url) = registry_url {
 		println!("\nQuerying registry: {}", url);
 		let full_url = format!("{}/api/v1/search?q={}", url, urlencoding(query));
-		match reqwest::blocking::get(&full_url) {
-			Ok(resp) if resp.status().is_success() => match resp.json::<RegistryResults>() {
+		match ureq::get(&full_url).call() {
+			Ok(resp) if resp.status() == 200 => match resp.into_json::<RegistryResults>() {
 				Ok(results) => {
 					if results.apps.is_empty() {
 						println!("  No remote results");

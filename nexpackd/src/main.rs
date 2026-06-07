@@ -1,69 +1,101 @@
 use nexpack_core::Bundle;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::RwLock;
 
 mod mount;
 mod sandbox;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
 	tracing_subscriber::fmt()
 		.with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "nexpackd=info".into()))
 		.init();
 
+	let config = load_config();
+	let idle_timeout = Duration::from_secs(config.idle_timeout.unwrap_or(300));
+	let update_interval = Duration::from_secs(config.update_interval.unwrap_or(3600));
+
 	let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
 	let socket_path = PathBuf::from(&runtime_dir).join("nexpack.sock");
-
 	let _ = std::fs::remove_file(&socket_path);
 
-	let state = Arc::new(RwLock::new(DaemonState {
+	let state = Arc::new(Mutex::new(DaemonState {
 		mounts: HashMap::new(),
 		store: nexpack_core::Store::user().ok(),
-		idle_timeout: Duration::from_secs(
-			std::env::var("NEXPACK_IDLE_TIMEOUT")
-				.ok()
-				.and_then(|s| s.parse::<u64>().ok())
-				.unwrap_or(300),
-		),
+		idle_timeout,
 	}));
 
-	let updater_state = state.clone();
-	let check_interval = std::env::var("NEXPACK_UPDATE_INTERVAL")
-		.ok()
-		.and_then(|s| s.parse::<u64>().ok())
-		.map(Duration::from_secs)
-		.unwrap_or(Duration::from_secs(3600));
-
-	tokio::spawn(async move {
-		background_update_checker(updater_state, check_interval).await;
-	});
+	let checker_state = state.clone();
+	std::thread::spawn(move || background_update_checker(checker_state, update_interval));
 
 	let idle_state = state.clone();
-	tokio::spawn(async move {
-		idle_mount_cleaner(idle_state).await;
-	});
+	std::thread::spawn(move || idle_mount_cleaner(idle_state));
 
-	let listener = UnixListener::bind(&socket_path)?;
+	let listener = std::os::unix::net::UnixListener::bind(&socket_path)?;
 	tracing::info!("nexpackd listening on {}", socket_path.display());
 
-	loop {
-		let (stream, _addr) = listener.accept().await?;
+	for stream in listener.incoming() {
+		let stream = stream?;
 		let state = state.clone();
-		tokio::spawn(async move {
-			if let Err(e) = handle_client(stream, state).await {
+		std::thread::spawn(move || {
+			if let Err(e) = handle_client(stream, state) {
 				tracing::error!("client error: {}", e);
 			}
 		});
 	}
+
+	Ok(())
 }
 
-async fn background_update_checker(_state: Arc<RwLock<DaemonState>>, interval: Duration) {
+#[derive(serde::Deserialize)]
+struct DaemonConfig {
+	idle_timeout: Option<u64>,
+	update_interval: Option<u64>,
+}
+
+fn load_config() -> DaemonConfig {
+	let config_dir = std::env::var("XDG_CONFIG_HOME")
+		.map(PathBuf::from)
+		.unwrap_or_else(|_| {
+			std::env::var("HOME")
+				.map(|h| PathBuf::from(h).join(".config"))
+				.unwrap_or_default()
+		})
+		.join("nexpack");
+	let config_path = config_dir.join("daemon.toml");
+
+	match std::fs::read_to_string(&config_path) {
+		Ok(content) => toml::from_str(&content).unwrap_or_else(|e| {
+			tracing::warn!("invalid daemon.toml: {}; using defaults", e);
+			DaemonConfig {
+				idle_timeout: None,
+				update_interval: None,
+			}
+		}),
+		Err(_) => DaemonConfig {
+			idle_timeout: None,
+			update_interval: None,
+		},
+	}
+}
+
+struct DaemonState {
+	mounts: HashMap<String, MountEntry>,
+	store: Option<nexpack_core::Store>,
+	idle_timeout: Duration,
+}
+
+struct MountEntry {
+	app_id: String,
+	rootfs: PathBuf,
+	refcount: u64,
+	last_active: Instant,
+}
+
+fn background_update_checker(_state: Arc<Mutex<DaemonState>>, interval: Duration) {
 	loop {
-		tokio::time::sleep(interval).await;
+		std::thread::sleep(interval);
 
 		let store = match nexpack_core::Store::user() {
 			Ok(s) => s,
@@ -96,8 +128,8 @@ async fn background_update_checker(_state: Arc<RwLock<DaemonState>>, interval: D
 
 			tracing::debug!("checking updates for {} from {}", app_id, update_url);
 
-			let feed = match reqwest::get(&update_url).await {
-				Ok(r) if r.status().is_success() => match r.json::<nexpack_core::update::UpdateFeed>().await {
+			let feed: nexpack_core::update::UpdateFeed = match ureq::get(&update_url).call() {
+				Ok(r) if r.status() == 200 => match r.into_json() {
 					Ok(f) => f,
 					Err(_) => continue,
 				},
@@ -124,15 +156,15 @@ async fn background_update_checker(_state: Arc<RwLock<DaemonState>>, interval: D
 					let hex = layer.digest.strip_prefix("blake3:").unwrap_or(&layer.digest);
 					tracing::info!("pre-fetching layer {} for {}", &hex[..16], app_id);
 
-					match reqwest::get(&layer.url).await {
-						Ok(r) if r.status().is_success() => match r.bytes().await {
-							Ok(data) => {
+					match ureq::get(&layer.url).call() {
+						Ok(r) if r.status() == 200 => {
+							let mut data = Vec::new();
+							if r.into_reader().read_to_end(&mut data).is_ok() {
 								if let Err(e) = store.store_layer(&data, hex) {
 									tracing::warn!("failed to store layer {}: {}", hex, e);
 								}
 							}
-							Err(e) => tracing::warn!("failed to download layer {}: {}", hex, e),
-						},
+						}
 						_ => tracing::warn!("HTTP error fetching layer {}", hex),
 					}
 				}
@@ -174,41 +206,24 @@ async fn background_update_checker(_state: Arc<RwLock<DaemonState>>, interval: D
 	}
 }
 
-#[allow(dead_code)]
-struct DaemonState {
-	mounts: HashMap<String, MountEntry>,
-	store: Option<nexpack_core::Store>,
-	idle_timeout: Duration,
-}
-
-#[allow(dead_code)]
-struct MountEntry {
-	app_id: String,
-	rootfs: PathBuf,
-	refcount: u64,
-	last_active: Instant,
-}
-
-async fn idle_mount_cleaner(state: Arc<RwLock<DaemonState>>) {
+fn idle_mount_cleaner(state: Arc<Mutex<DaemonState>>) {
 	let check_interval = Duration::from_secs(60);
 	loop {
-		tokio::time::sleep(check_interval).await;
-		let timeout = {
-			let s = state.read().await;
-			s.idle_timeout
-		};
+		std::thread::sleep(check_interval);
+
 		let to_remove: Vec<String> = {
-			let s = state.read().await;
+			let s = state.lock().unwrap();
 			s.mounts
 				.iter()
-				.filter(|(_, e)| e.refcount == 0 && e.last_active.elapsed() >= timeout)
+				.filter(|(_, e)| e.refcount == 0 && e.last_active.elapsed() >= s.idle_timeout)
 				.map(|(id, _)| id.clone())
 				.collect()
 		};
+
 		for app_id in to_remove {
-			let mut s = state.write().await;
+			let mut s = state.lock().unwrap();
 			if let Some(entry) = s.mounts.get(&app_id) {
-				if entry.refcount == 0 && entry.last_active.elapsed() >= timeout {
+				if entry.refcount == 0 && entry.last_active.elapsed() >= s.idle_timeout {
 					tracing::info!("idle timeout: unmounting {}", app_id);
 					if let Err(e) = mount::unmount_overlay(&entry.rootfs) {
 						tracing::warn!("failed to unmount idle {}: {}", app_id, e);
@@ -221,17 +236,21 @@ async fn idle_mount_cleaner(state: Arc<RwLock<DaemonState>>) {
 	}
 }
 
-async fn handle_client(stream: UnixStream, state: Arc<RwLock<DaemonState>>) -> anyhow::Result<()> {
-	let mut std_stream = stream.into_std()?;
-	let mut reader = std::io::BufReader::new(&std_stream);
-	let mut writer = &std_stream;
+fn handle_client(stream: std::os::unix::net::UnixStream, state: Arc<Mutex<DaemonState>>) -> anyhow::Result<()> {
+	let mut reader = std::io::BufReader::new(&stream);
+	let mut writer = &stream;
 
 	let request_reader = capnp::serialize::read_message(&mut reader, capnp::message::ReaderOptions::default())?;
 	let request = request_reader.get_root::<nexpack_ipc::ipc_capnp::request::Reader>()?;
 
 	enum RequestKind {
-		Mount { bundle: String, offline: bool },
-		Unmount { app_id: String },
+		Mount {
+			bundle: String,
+			offline: bool,
+		},
+		Unmount {
+			app_id: String,
+		},
 		List,
 		Status,
 	}
@@ -254,38 +273,30 @@ async fn handle_client(stream: UnixStream, state: Arc<RwLock<DaemonState>>) -> a
 		nexpack_ipc::ipc_capnp::request::Status(_) => RequestKind::Status,
 	};
 
-	drop(request_reader);
-
-	let mut write_error = |e: &anyhow::Error| -> anyhow::Result<()> {
+	let write_error = |e: &anyhow::Error, w: &mut &std::os::unix::net::UnixStream| -> anyhow::Result<()> {
 		let mut msg = capnp::message::Builder::new_default();
 		{
 			let mut resp = msg.init_root::<nexpack_ipc::ipc_capnp::response::Builder>();
 			let mut err = resp.init_error();
 			err.set_message(&e.to_string());
 		}
-		capnp::serialize::write_message(&mut writer, &msg)?;
+		capnp::serialize::write_message(w, &msg)?;
 		Ok(())
 	};
 
 	match kind {
-		RequestKind::Mount { bundle, offline } => {
-			match handle_mount(&bundle, offline, &state).await {
-				Ok(msg) => capnp::serialize::write_message(&mut writer, &msg)?,
-				Err(e) => write_error(&e)?,
-			}
-		}
-		RequestKind::Unmount { app_id } => {
-			match handle_unmount(&app_id, &state).await {
-				Ok(msg) => capnp::serialize::write_message(&mut writer, &msg)?,
-				Err(e) => write_error(&e)?,
-			}
-		}
-		RequestKind::List => {
-			match handle_list(&state).await {
-				Ok(msg) => capnp::serialize::write_message(&mut writer, &msg)?,
-				Err(e) => write_error(&e)?,
-			}
-		}
+		RequestKind::Mount { bundle, offline } => match handle_mount(&bundle, offline, &state) {
+			Ok(msg) => capnp::serialize::write_message(&mut writer, &msg)?,
+			Err(e) => write_error(&e, &mut writer)?,
+		},
+		RequestKind::Unmount { app_id } => match handle_unmount(&app_id, &state) {
+			Ok(msg) => capnp::serialize::write_message(&mut writer, &msg)?,
+			Err(e) => write_error(&e, &mut writer)?,
+		},
+		RequestKind::List => match handle_list(&state) {
+			Ok(msg) => capnp::serialize::write_message(&mut writer, &msg)?,
+			Err(e) => write_error(&e, &mut writer)?,
+		},
 		RequestKind::Status => {
 			let mut msg = capnp::message::Builder::new_default();
 			{
@@ -301,10 +312,10 @@ async fn handle_client(stream: UnixStream, state: Arc<RwLock<DaemonState>>) -> a
 	Ok(())
 }
 
-async fn handle_mount(
+fn handle_mount(
 	bundle_path: &str,
 	offline: bool,
-	state: &Arc<RwLock<DaemonState>>,
+	state: &Arc<Mutex<DaemonState>>,
 ) -> anyhow::Result<capnp::message::Builder<capnp::message::HeapAllocator>> {
 	let bundle = Bundle::open(bundle_path)?;
 	let app_id = bundle.header.app_id.clone();
@@ -330,15 +341,17 @@ async fn handle_mount(
 			.map(|o| o.to_string_lossy().to_string())
 			.collect();
 
-	let mut state = state.write().await;
-	let entry = state.mounts.entry(app_id.clone()).or_insert(MountEntry {
-		app_id: app_id.clone(),
-		rootfs: merged.clone(),
-		refcount: 0,
-		last_active: Instant::now(),
-	});
-	entry.refcount += 1;
-	entry.last_active = Instant::now();
+	{
+		let mut s = state.lock().unwrap();
+		let entry = s.mounts.entry(app_id.clone()).or_insert(MountEntry {
+			app_id: app_id.clone(),
+			rootfs: merged.clone(),
+			refcount: 0,
+			last_active: Instant::now(),
+		});
+		entry.refcount += 1;
+		entry.last_active = Instant::now();
+	}
 
 	let seccomp_filter = sandbox::generate_seccomp_filter(&bundle.header.permissions);
 
@@ -361,21 +374,21 @@ async fn handle_mount(
 	Ok(msg)
 }
 
-async fn handle_unmount(
+fn handle_unmount(
 	app_id: &str,
-	state: &Arc<RwLock<DaemonState>>,
+	state: &Arc<Mutex<DaemonState>>,
 ) -> anyhow::Result<capnp::message::Builder<capnp::message::HeapAllocator>> {
-	let mut state = state.write().await;
+	let mut s = state.lock().unwrap();
 	let mut msg = capnp::message::Builder::new_default();
 	{
 		let mut resp = msg.init_root::<nexpack_ipc::ipc_capnp::response::Builder>();
 
-		if let Some(entry) = state.mounts.get_mut(app_id) {
+		if let Some(entry) = s.mounts.get_mut(app_id) {
 			entry.refcount = entry.refcount.saturating_sub(1);
 			entry.last_active = Instant::now();
 			if entry.refcount == 0 {
 				mount::unmount_overlay(&entry.rootfs)?;
-				state.mounts.remove(app_id);
+				s.mounts.remove(app_id);
 				let mut u = resp.init_unmount();
 				u.set_status("unmounted");
 			} else {
@@ -390,16 +403,14 @@ async fn handle_unmount(
 	Ok(msg)
 }
 
-async fn handle_list(
-	state: &Arc<RwLock<DaemonState>>,
-) -> anyhow::Result<capnp::message::Builder<capnp::message::HeapAllocator>> {
-	let state = state.read().await;
+fn handle_list(state: &Arc<Mutex<DaemonState>>) -> anyhow::Result<capnp::message::Builder<capnp::message::HeapAllocator>> {
+	let s = state.lock().unwrap();
 	let mut msg = capnp::message::Builder::new_default();
 	{
 		let mut resp = msg.init_root::<nexpack_ipc::ipc_capnp::response::Builder>();
 		let mut list_resp = resp.init_list();
-		let mut apps = list_resp.init_apps(state.mounts.len() as u32);
-		for (i, (id, entry)) in state.mounts.iter().enumerate() {
+		let mut apps = list_resp.init_apps(s.mounts.len() as u32);
+		for (i, (id, entry)) in s.mounts.iter().enumerate() {
 			let mut app_info = apps.reborrow().get(i as u32);
 			app_info.set_app_id(id);
 			app_info.set_rootfs(&entry.rootfs.to_string_lossy());
