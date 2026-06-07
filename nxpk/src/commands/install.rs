@@ -55,7 +55,6 @@ fn create_desktop_entry(bundle: &Bundle) -> anyhow::Result<()> {
 	let apps_dir = data_home.join("applications");
 	std::fs::create_dir_all(&apps_dir)?;
 
-	
 	let bundle_path = find_bundle_path(app_id);
 	let desktop_path = apps_dir.join(format!("{}.desktop", app_id));
 
@@ -77,13 +76,12 @@ fn create_desktop_entry(bundle: &Bundle) -> anyhow::Result<()> {
 }
 
 fn find_bundle_path(app_id: &str) -> String {
-	
 	let store_path = format!("~/.local/share/nexpack/apps/{}/current", app_id);
 	let expanded = shellexpand(&store_path);
 	if std::path::Path::new(&expanded).exists() {
 		return expanded;
 	}
-	
+
 	app_id.to_string()
 }
 

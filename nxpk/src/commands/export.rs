@@ -12,7 +12,7 @@ pub fn export_app(app_id: &str) -> anyhow::Result<()> {
 	}
 
 	let meta = std::fs::read(&meta_path)?;
-	let header: BundleHeader = ciborium::de::from_reader(&meta[..]).map_err(|e| anyhow::anyhow!("CBOR decode: {}", e))?;
+	let header: BundleHeader = BundleHeader::parse(&meta).map_err(|e| anyhow::anyhow!("header decode: {}", e))?;
 
 	let output_name = format!("{}.nxpk", app_id.rsplit('.').next().unwrap_or(app_id));
 	let output_path = Path::new(&output_name);

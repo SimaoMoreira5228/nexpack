@@ -116,7 +116,7 @@ fn background_update_checker(_state: Arc<Mutex<DaemonState>>, interval: Duration
 				Err(_) => continue,
 			};
 
-			let header: nexpack_core::BundleHeader = match ciborium::de::from_reader(&meta[..]) {
+			let header: nexpack_core::BundleHeader = match nexpack_core::BundleHeader::parse(&meta) {
 				Ok(h) => h,
 				Err(_) => continue,
 			};

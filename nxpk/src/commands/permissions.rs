@@ -13,7 +13,7 @@ pub fn permissions(app_id: &str, edit: bool) -> anyhow::Result<()> {
 
 	let meta = std::fs::read(&meta_path)?;
 	let header: nexpack_core::BundleHeader =
-		ciborium::de::from_reader(&meta[..]).map_err(|e| anyhow::anyhow!("CBOR decode: {}", e))?;
+		nexpack_core::BundleHeader::parse(&meta).map_err(|e| anyhow::anyhow!("header decode: {}", e))?;
 
 	println!("Permissions for: {}", app_id);
 	println!("  network:    {:?}", header.permissions.network);
@@ -118,7 +118,6 @@ fn edit_permissions(app_id: &str, meta_path: &std::path::Path, header: &nexpack_
 				}
 			}
 			"6" => {
-				
 				let mut new_header = header.clone();
 				new_header.permissions = perm;
 				let encoded = new_header.encode()?;

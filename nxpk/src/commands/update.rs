@@ -33,7 +33,7 @@ fn check_and_apply_updates(app_id: &str) -> anyhow::Result<()> {
 
 	let meta = std::fs::read(&meta_path)?;
 	let header: nexpack_core::BundleHeader =
-		ciborium::de::from_reader(&meta[..]).map_err(|e| anyhow::anyhow!("CBOR decode: {}", e))?;
+		nexpack_core::BundleHeader::parse(&meta).map_err(|e| anyhow::anyhow!("header decode: {}", e))?;
 
 	let update_url = match &header.update_url {
 		Some(url) => url.clone(),

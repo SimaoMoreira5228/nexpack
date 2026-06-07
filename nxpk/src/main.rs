@@ -81,10 +81,6 @@ enum Commands {
 		app_id: String,
 	},
 
-	Search {
-		query: String,
-	},
-
 	Sign {
 		bundle: String,
 
@@ -156,7 +152,6 @@ fn main() -> anyhow::Result<()> {
 		}
 		Commands::Pack { spec } => commands::pack::pack(&spec),
 		Commands::Export { app_id } => commands::export::export_app(&app_id),
-		Commands::Search { query } => commands::search::search(&query),
 		Commands::Sign { bundle, output } => commands::sign::sign_bundle(&bundle, output.as_deref()),
 		Commands::Compat(cmd) => match cmd {
 			CompatCommands::Run { appimage, args } => commands::compat::run_compat(&appimage, &args),

@@ -5,9 +5,10 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+nexpack-ipc = { path = "../nexpack-ipc" }
+capnp.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-ciborium.workspace = true
 blake3.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true

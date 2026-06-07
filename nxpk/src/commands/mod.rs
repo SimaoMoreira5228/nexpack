@@ -7,7 +7,6 @@ pub mod pack;
 pub mod permissions;
 pub mod remove;
 pub mod run;
-pub mod search;
 pub mod sign;
 pub mod trust;
 pub mod update;
