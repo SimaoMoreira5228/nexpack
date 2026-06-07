@@ -79,8 +79,8 @@ impl Store {
 			source: e,
 		})?;
 
-		std::fs::write(app_dir.join("meta.cbor"), meta).map_err(|e| Error::Io {
-			context: "writing meta.cbor".into(),
+		std::fs::write(app_dir.join("meta.capnp"), meta).map_err(|e| Error::Io {
+			context: "writing meta.capnp".into(),
 			source: e,
 		})?;
 

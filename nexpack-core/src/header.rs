@@ -43,7 +43,7 @@ impl BundleHeader {
 			.get_root::<nexpack_ipc::header_capnp::bundle_header::Reader>()
 			.map_err(|e| Error::InvalidFormat(format!("Cap'n Proto root: {}", e)))?;
 
-		let encoded_len = (magic_pos + 4 + cursor.position() as usize) as u64;
+		let encoded_len = (4 + cursor.position()) as u64;
 
 		let version = header_reader.get_version();
 		let app_id = header_reader.get_app_id().map_err(|e| Error::InvalidFormat(e.to_string()))?;

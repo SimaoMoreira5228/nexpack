@@ -407,11 +407,16 @@ static int try_connect_daemon(char *sock_path)
     return (int)sock;
 }
 
+void _start_c(unsigned long *sp);
+
+__attribute__((naked))
 void _start(void)
 {
-    unsigned long *sp;
-    __asm__ volatile ("mov %%rsp, %0" : "=r"(sp));
+    __asm__ volatile ("movq %%rsp, %%rdi; jmp _start_c" ::: "rdi");
+}
 
+void _start_c(unsigned long *sp)
+{
     int argc = (int)sp[0];
     char **argv = (char **)(sp + 1);
     char **envp = argv + argc + 1;

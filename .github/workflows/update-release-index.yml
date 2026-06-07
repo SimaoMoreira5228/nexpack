@@ -1,0 +1,22 @@
+name: update release index
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  update-index:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: regenerate release index
+        run: bash scripts/gen-release-index.sh
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+      - name: commit updated readme
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "update release index in readme"
+          file_pattern: README.md

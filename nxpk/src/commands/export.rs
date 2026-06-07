@@ -2,10 +2,12 @@ use nexpack_core::{BundleHeader, Store, Verifier};
 use std::io::Write;
 use std::path::Path;
 
+include!(concat!(env!("OUT_DIR"), "/stub_bytes.rs"));
+
 pub fn export_app(app_id: &str) -> anyhow::Result<()> {
 	let store = Store::user()?;
 	let app_dir = store.apps_dir().join(app_id);
-	let meta_path = app_dir.join("meta.cbor");
+	let meta_path = app_dir.join("meta.capnp");
 
 	if !meta_path.exists() {
 		anyhow::bail!("app '{}' is not installed", app_id);
@@ -20,7 +22,7 @@ pub fn export_app(app_id: &str) -> anyhow::Result<()> {
 	eprintln!("Exporting: {} v{}", app_id, header.app_version);
 	eprintln!("  Output:  {}", output_path.display());
 
-	let stub_data = find_stub()?;
+	let stub_data = STUB_BYTES.to_vec();
 	let header_bytes = header.encode()?;
 
 	let mut out = std::fs::File::create(output_path)?;
@@ -45,28 +47,6 @@ pub fn export_app(app_id: &str) -> anyhow::Result<()> {
 	eprintln!("Done: {} ({})", output_path.display(), format_size(file_size));
 
 	Ok(())
-}
-
-fn find_stub() -> anyhow::Result<Vec<u8>> {
-	for loc in &["./stub/stub", "../stub/stub", "/nix/store/*/stub"] {
-		if loc.contains('*') {
-			if let Ok(entries) = std::fs::read_dir("/nix/store") {
-				for entry in entries.flatten() {
-					let candidate = entry.path().join("stub");
-					if candidate.is_file() {
-						return std::fs::read(&candidate).map_err(|e| anyhow::anyhow!("reading stub: {}", e));
-					}
-				}
-			}
-			continue;
-		}
-		let path = Path::new(loc);
-		if path.is_file() {
-			return std::fs::read(path).map_err(|e| anyhow::anyhow!("reading stub {}: {}", path.display(), e));
-		}
-	}
-
-	anyhow::bail!("stub not found. Build with: make -C stub");
 }
 
 fn format_size(size: u64) -> String {

@@ -5,7 +5,7 @@ use std::io::{self, Write};
 pub fn permissions(app_id: &str, edit: bool) -> anyhow::Result<()> {
 	let store = Store::user()?;
 	let app_dir = store.apps_dir().join(app_id);
-	let meta_path = app_dir.join("meta.cbor");
+	let meta_path = app_dir.join("meta.capnp");
 
 	if !meta_path.exists() {
 		anyhow::bail!("app '{}' is not installed", app_id);

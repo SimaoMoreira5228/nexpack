@@ -109,7 +109,7 @@ fn background_update_checker(_state: Arc<Mutex<DaemonState>>, interval: Duration
 
 		for app_id in &apps {
 			let app_dir = store.apps_dir().join(app_id);
-			let meta_path = app_dir.join("meta.cbor");
+			let meta_path = app_dir.join("meta.capnp");
 
 			let meta = match std::fs::read(&meta_path) {
 				Ok(m) => m,

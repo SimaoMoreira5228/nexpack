@@ -15,11 +15,13 @@
           overlays = [ (import rust-overlay) ];
         };
 
+        capnpPkg = pkgs.capnp.out;
+
         rustToolchain = pkgs.rust-bin.stable.latest.default.override {
           extensions = [ "rust-src" "rust-analyzer" ];
         };
 
-        pythonEnv = pkgs.python3.withPackages (ps: [ ps.cbor2 ]);
+        pythonEnv = pkgs.python3.withPackages (ps: [ ]);
       in
       {
         devShells.default = pkgs.mkShell {

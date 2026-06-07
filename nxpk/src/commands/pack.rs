@@ -4,6 +4,8 @@ use nexpack_core::{
 };
 use std::path::{Path, PathBuf};
 
+include!(concat!(env!("OUT_DIR"), "/stub_bytes.rs"));
+
 #[derive(serde::Deserialize)]
 struct PackSpec {
 	app: PackApp,
@@ -48,7 +50,7 @@ pub fn pack(spec_path: &str) -> anyhow::Result<()> {
 
 	let output_name = format!("{}.nxpk", spec.app.id.split('.').last().unwrap_or("app"));
 	let output_path = Path::new(&output_name);
-	let stub_data = find_stub()?;
+	let stub_data = STUB_BYTES.to_vec();
 	let mut layers: Vec<LayerRef> = Vec::new();
 	let mut layer_data: Vec<Vec<u8>> = Vec::new();
 
@@ -166,49 +168,6 @@ fn build_erofs(source: &Path) -> anyhow::Result<Vec<u8>> {
 	}
 
 	anyhow::bail!("mkfs.erofs not found. Install erofs-utils or run in nix dev shell");
-}
-
-fn find_stub() -> anyhow::Result<Vec<u8>> {
-	for loc in &["./stub/stub", "../stub/stub", "/nix/store/*/stub"] {
-		if loc.contains('*') {
-			if let Ok(entries) = std::fs::read_dir("/nix/store") {
-				for entry in entries.flatten() {
-					let candidate = entry.path().join("stub");
-					if candidate.is_file() {
-						return std::fs::read(&candidate).map_err(|e| anyhow::anyhow!("reading stub: {}", e));
-					}
-				}
-			}
-			continue;
-		}
-		let path = Path::new(loc);
-		if path.is_file() {
-			return std::fs::read(path).map_err(|e| anyhow::anyhow!("reading stub {}: {}", path.display(), e));
-		}
-	}
-
-	eprintln!("Stub not found, building it...");
-	let status = std::process::Command::new("make")
-		.arg("-C")
-		.arg(if Path::new("stub/Makefile").exists() {
-			"stub"
-		} else {
-			"../stub"
-		})
-		.status()
-		.map_err(|e| anyhow::anyhow!("make failed: {}", e))?;
-
-	if !status.success() {
-		anyhow::bail!("stub build failed");
-	}
-
-	let stub_path = if Path::new("stub/stub").exists() {
-		"stub/stub"
-	} else {
-		"../stub/stub"
-	};
-
-	std::fs::read(stub_path).map_err(|e| anyhow::anyhow!("reading stub: {}", e))
 }
 
 fn find_tool(name: &str) -> Option<String> {
