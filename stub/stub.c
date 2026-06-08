@@ -489,5 +489,39 @@ void _start_c(unsigned long *sp)
         sys_exit(1);
     }
 
-    sys_exit(0);
+    {
+        sys_close((int)sock);
+
+        char nxpk_bin[MAX_ARG_LEN] = {0};
+        if (find_in_path("nxpk", nxpk_bin, sizeof(nxpk_bin), envp) == 0) {
+            char *exec_argv[MAX_ARGS + 3];
+            int fi = 0;
+            exec_argv[fi++] = nxpk_bin;
+            exec_argv[fi++] = "run";
+            exec_argv[fi++] = (char *)self_path;
+            for (int j = 1; j < argc && fi < MAX_ARGS + 2; j++) {
+                exec_argv[fi++] = argv[j];
+            }
+            exec_argv[fi] = 0;
+            sys_execve(nxpk_bin, exec_argv, envp);
+        }
+
+        char extracted_nxpk[MAX_ARG_LEN] = {0};
+        if (try_bootstrap_and_start_daemon(self_path, envp, extracted_nxpk, sizeof(extracted_nxpk)) == 0) {
+            char *exec_argv[MAX_ARGS + 3];
+            int fi = 0;
+            exec_argv[fi++] = extracted_nxpk;
+            exec_argv[fi++] = "run";
+            exec_argv[fi++] = (char *)self_path;
+            for (int j = 1; j < argc && fi < MAX_ARGS + 2; j++) {
+                exec_argv[fi++] = argv[j];
+            }
+            exec_argv[fi] = 0;
+            sys_execve(extracted_nxpk, exec_argv, envp);
+        }
+
+        const char m[] = "nexpack: nxpk not found. Install it or run: nxpk run <bundle>\n";
+        sys_write(2, m, str_len(m));
+        sys_exit(1);
+    }
 }

@@ -36,6 +36,8 @@ pub fn build_overlay(app_id: &str, bundle: &Bundle, store: &nexpack_core::Store)
 		try_fuse_overlay_mount(&lower_dirs, &upper_dir, &work_dir, &merged_dir)?;
 	}
 
+	prepare_rootfs(&merged_dir)?;
+
 	tracing::info!(
 		"mounted {} overlay: {} lower layers -> {}",
 		app_id,
@@ -44,6 +46,23 @@ pub fn build_overlay(app_id: &str, bundle: &Bundle, store: &nexpack_core::Store)
 	);
 
 	Ok(merged_dir)
+}
+
+fn prepare_rootfs(rootfs: &Path) -> anyhow::Result<()> {
+	for dir in &["proc", "dev", "sys", "tmp", "run"] {
+		let p = rootfs.join(dir);
+		if !p.exists() {
+			std::fs::create_dir_all(&p).with_context(|| format!("creating {dir} in rootfs"))?;
+		}
+	}
+
+	// /dev/pts is needed by bwrap's --dev for the devpts mount
+	let devpts = rootfs.join("dev").join("pts");
+	if !devpts.exists() {
+		std::fs::create_dir_all(&devpts).context("creating /dev/pts in rootfs")?;
+	}
+
+	Ok(())
 }
 
 fn mount_erofs(image: &Path, mount_point: &Path) -> anyhow::Result<()> {
