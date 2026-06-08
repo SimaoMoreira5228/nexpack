@@ -88,7 +88,7 @@ static long sys_socket(int domain, int type, int protocol)
 static long sys_connect(int fd, const struct sockaddr_un *addr,
                          unsigned long addrlen)
 {
-    return sys_call(SYS_connect, fd, (long)addr, addrlen);
+    return sys_call(SYS_connect, (long)fd, (long)addr, addrlen);
 }
 
 static long sys_execve(const char *path, char *const argv[], char *const envp[])
@@ -219,8 +219,8 @@ static int read_bootstrap_trailer(const char *path, unsigned long *offset_out, u
     unsigned long trailer_off = (unsigned long)file_size - 20;
     sys_lseek(fd, (long)trailer_off, SEEK_SET);
 
-    char trailer[20];
-    if (read_all(fd, trailer, 20) < 0) { sys_close(fd); return -1; }
+    unsigned char trailer[20];
+    if (read_all(fd, (char *)trailer, 20) < 0) { sys_close(fd); return -1; }
     sys_close(fd);
 
     if (trailer[0] != 'N' || trailer[1] != 'X' || trailer[2] != 'B' || trailer[3] != 'T')
@@ -258,25 +258,25 @@ static int extract_self_bootstrap(const char *bundle_path, const char *bin_dir)
 
     sys_lseek(fd, (long)boot_off, SEEK_SET);
 
-    char hdr[4];
-    if (read_all(fd, hdr, 4) < 0) { sys_close(fd); return -1; }
+    unsigned char hdr[4];
+    if (read_all(fd, (char *)hdr, 4) < 0) { sys_close(fd); return -1; }
     unsigned int count = (unsigned int)hdr[0]
         | ((unsigned int)hdr[1] << 8)
         | ((unsigned int)hdr[2] << 16)
         | ((unsigned int)hdr[3] << 24);
 
     for (unsigned int i = 0; i < count; i++) {
-        char nl[2];
-        if (read_all(fd, nl, 2) < 0) { sys_close(fd); return -1; }
+        unsigned char nl[2];
+        if (read_all(fd, (char *)nl, 2) < 0) { sys_close(fd); return -1; }
         unsigned int name_len = (unsigned int)nl[0] | ((unsigned int)nl[1] << 8);
 
-        char name[256];
+        unsigned char name[256];
         if (name_len >= sizeof(name)) { sys_close(fd); return -1; }
-        if (read_all(fd, name, name_len) < 0) { sys_close(fd); return -1; }
+        if (read_all(fd, (char *)name, name_len) < 0) { sys_close(fd); return -1; }
         name[name_len] = '\0';
 
-        char dl[4];
-        if (read_all(fd, dl, 4) < 0) { sys_close(fd); return -1; }
+        unsigned char dl[4];
+        if (read_all(fd, (char *)dl, 4) < 0) { sys_close(fd); return -1; }
         unsigned long data_len = (unsigned long)dl[0]
             | ((unsigned long)dl[1] << 8)
             | ((unsigned long)dl[2] << 16)
@@ -291,36 +291,31 @@ static int extract_self_bootstrap(const char *bundle_path, const char *bin_dir)
         file_path[pi++] = '/';
         unsigned long ni = 0;
         while (name[ni] && pi < sizeof(file_path) - 1) {
-            file_path[pi++] = name[ni++];
+            file_path[pi++] = (char)name[ni++];
         }
         file_path[pi] = '\0';
 
         char fbuf[4096];
         unsigned long remaining = data_len;
+
+        int wfd = (int)sys_open(file_path, O_WRONLY | O_CREAT | O_TRUNC, 0700);
+        if (wfd < 0) { sys_close(fd); return -1; }
+
         while (remaining > 0) {
             unsigned long chunk = remaining < sizeof(fbuf) ? remaining : sizeof(fbuf);
-            if (read_all(fd, fbuf, chunk) < 0) { sys_close(fd); return -1; }
-
-            if (i == 0) {
-                int wfd = (int)sys_open(file_path, O_WRONLY | O_CREAT | O_TRUNC, 0700);
-                if (wfd < 0) { sys_close(fd); return -1; }
-                if (write_all(wfd, fbuf, chunk) < 0) { sys_close(wfd); sys_close(fd); return -1; }
-                sys_close(wfd);
-            } else {
-                int wfd = (int)sys_open(file_path, O_WRONLY | O_CREAT | O_TRUNC, 0700);
-                if (wfd < 0) { sys_close(fd); return -1; }
-                if (write_all(wfd, fbuf, chunk) < 0) { sys_close(wfd); sys_close(fd); return -1; }
-                sys_close(wfd);
-            }
+            if (read_all(fd, fbuf, chunk) < 0) { sys_close(wfd); sys_close(fd); return -1; }
+            if (write_all(wfd, fbuf, chunk) < 0) { sys_close(wfd); sys_close(fd); return -1; }
             remaining -= chunk;
         }
+
+        sys_close(wfd);
     }
 
     sys_close(fd);
     return 0;
 }
 
-static int try_bootstrap_and_start_daemon(const char *bundle_path, char *envp[])
+static int try_bootstrap_and_start_daemon(const char *bundle_path, char *envp[], char *nxpk_out, unsigned long nxpk_max)
 {
     const char *home = env_get(envp, "HOME");
     if (!home) return -1;
@@ -342,8 +337,9 @@ static int try_bootstrap_and_start_daemon(const char *bundle_path, char *envp[])
     char mkdir_buf[256];
     str_copy(home, mkdir_buf, sizeof(mkdir_buf));
     unsigned long mpi = str_len(mkdir_buf);
-    const char *parts[] = { "/.local", "/.local/share", "/.local/share/nexpack", "/.local/share/nexpack/bin", 0 };
+    const char *parts[] = { ".local", "share", "nexpack", "bin", 0 };
     for (int i = 0; parts[i]; i++) {
+        mkdir_buf[mpi++] = '/';
         str_copy(parts[i], mkdir_buf + mpi, sizeof(mkdir_buf) - mpi);
         make_dir_for(mkdir_buf);
         mpi = str_len(mkdir_buf);
@@ -365,6 +361,18 @@ static int try_bootstrap_and_start_daemon(const char *bundle_path, char *envp[])
     }
     nexpackd_path[np] = '\0';
 
+    unsigned long np2 = 0;
+    while (bin_dir[np2] && np2 < nxpk_max - 1) {
+        nxpk_out[np2] = bin_dir[np2];
+        np2++;
+    }
+    const char *bn2 = "/nxpk";
+    unsigned long bni2 = 0;
+    while (bn2[bni2] && np2 < nxpk_max - 1) {
+        nxpk_out[np2++] = bn2[bni2++];
+    }
+    nxpk_out[np2] = '\0';
+
     long pid = sys_fork();
     if (pid == 0) {
         char *daemon_argv[] = { nexpackd_path, 0 };
@@ -377,7 +385,7 @@ static int try_bootstrap_and_start_daemon(const char *bundle_path, char *envp[])
     {
         struct timespec ts;
         ts.tv_sec = 0;
-        ts.tv_nsec = 300000000;
+        ts.tv_nsec = 800000000;
         sys_call(SYS_nanosleep, (long)&ts, 0, 0);
     }
 
@@ -458,42 +466,26 @@ void _start_c(unsigned long *sp)
             sys_execve(nxpk_bin, fallback_argv, envp);
         }
 
-        if (try_bootstrap_and_start_daemon(self_path, envp) == 0) {
+        char extracted_nxpk[MAX_ARG_LEN] = {0};
+        if (try_bootstrap_and_start_daemon(self_path, envp, extracted_nxpk, sizeof(extracted_nxpk)) == 0) {
             sock = try_connect_daemon(sock_path);
-        }
-
-        if (sock < 0) {
-            const char m[] = "nexpack: daemon not available. Install nxpk or run: nexpackd &\n";
-            sys_write(2, m, str_len(m));
-            sys_exit(1);
-        }
-    }
-
-    if (sock >= 0) {
-        sys_close((int)sock);
-    }
-
-    {
-        char nxpk_bin[MAX_ARG_LEN] = {0};
-        if (find_in_path("nxpk", nxpk_bin, sizeof(nxpk_bin), envp) == 0) {
-            char *fallback_argv[MAX_ARGS + 3];
-            int fi = 0;
-            fallback_argv[fi++] = nxpk_bin;
-            fallback_argv[fi++] = "run";
-            fallback_argv[fi++] = (char *)self_path;
-            for (int j = 1; j < argc && fi < MAX_ARGS + 2; j++) {
-                fallback_argv[fi++] = argv[j];
+            if (sock >= 0) {
+                sys_close((int)sock);
+                char *exec_argv[MAX_ARGS + 3];
+                int fi = 0;
+                exec_argv[fi++] = extracted_nxpk;
+                exec_argv[fi++] = "run";
+                exec_argv[fi++] = (char *)self_path;
+                for (int j = 1; j < argc && fi < MAX_ARGS + 2; j++) {
+                    exec_argv[fi++] = argv[j];
+                }
+                exec_argv[fi] = 0;
+                sys_execve(extracted_nxpk, exec_argv, envp);
             }
-            fallback_argv[fi] = 0;
-            sys_execve(nxpk_bin, fallback_argv, envp);
         }
-        if (try_bootstrap_and_start_daemon(self_path, envp) == 0) {
-            const char m[] = "nexpack: daemon started from bootstrap data. Run: nxpk run <bundle>\n";
-            sys_write(2, m, str_len(m));
-        } else {
-            const char m[] = "nexpack: daemon not available. Install nxpk or run: nexpackd &\n";
-            sys_write(2, m, str_len(m));
-        }
+
+        const char m[] = "nexpack: daemon not available. Install nxpk or run: nexpackd &\n";
+        sys_write(2, m, str_len(m));
         sys_exit(1);
     }
 
