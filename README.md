@@ -1,20 +1,20 @@
-# Nexpack -- Modern Linux Portable Apps
+# Nexpack — Modern Linux Portable Apps
 
-Nexpack is a portable application format for Linux that replaces AppImage. It lets you distribute a single `.nxpk` file that users download and run, while getting proper sandboxing, delta updates, layer deduplication, and enforced signing.
+Nexpack is a portable application format for Linux. Distribute a single `.nxpk` file that users can `chmod +x && ./app.nxpk` with zero setup. Sandboxing via bubblewrap is opt-in (`--sandbox`); by default apps run with full filesystem access.
 
 ## Quick Start
 
 ```bash
-# Build a bundle from a spec file
-nxpk pack spec.toml
+# chmod +x && run — no install needed
+chmod +x myapp.nxpk && ./myapp.nxpk
 
-# Run it directly
+# Or with nxpk installed
 nxpk run myapp.nxpk
+nxpk run myapp.nxpk --sandbox    # enable sandbox
+nxpk run myapp.nxpk --no-sandbox # explicit no sandbox (default)
 
 # Install to the local store
 nxpk install myapp.nxpk
-
-# Run from the store later
 nxpk run io.example.myapp
 
 # Check for updates (if the bundle declared an update_url)
@@ -29,8 +29,9 @@ nxpk gc
 
 ## Packing a Bundle
 
-`nxpk pack` takes a `spec.toml` that describes your app. Here is a minimal one:
+`nxpk pack` takes a `spec.toml`. The `source` directory is baked into an erofs layer and becomes the app's root filesystem. `entrypoint` is the path inside that rootfs that gets executed.
 
+Minimal spec:
 ```toml
 [app]
 id = "io.helix-editor.helix"
@@ -42,9 +43,7 @@ role = "app"
 source = "./staging"
 ```
 
-The `source` directory is what gets baked into the erofs layer. Everything inside `source/` becomes the app's root filesystem. `entrypoint` is the path inside that rootfs that gets executed.
-
-If you want sandbox permissions you add a `[permissions]` section:
+Apps that need to download or install to arbitrary locations (launchers, game managers, etc.) can run without sandbox — that's the default. Add `[permissions]` to declare what the sandbox should grant when `--sandbox` is used:
 
 ```toml
 [app]
@@ -62,7 +61,9 @@ role = "app"
 source = "./staging"
 ```
 
-If you want the bundle to self-bootstrap (so it runs without `nexpackd` or `nxpk` pre-installed) you embed static binaries:
+## Self-Bootstrapping (Recommended)
+
+Embed the nexpack runtime so users don't need anything pre-installed:
 
 ```toml
 [bootstrap]
@@ -70,11 +71,26 @@ nexpackd = "./target/release/nexpackd"
 nxpk = "./target/release/nxpk"
 ```
 
-The user can then `chmod +x myapp.nxpk && ./myapp.nxpk` and it works with zero setup. The embedded binaries get extracted on first run.
+The user can then:
+
+```bash
+chmod +x myapp.nxpk && ./myapp.nxpk
+```
+
+On first run, the ELF stub extracts `nexpackd` and `nxpk` to `~/.local/share/nexpack/bin/`, starts the daemon, and launches the app. The extracted binaries are reused on subsequent runs.
+
+## Sandbox
+
+Sandbox is **opt-in**. By default, the app runs with full filesystem access (no bubblewrap, no seccomp). Pass `--sandbox` to enable:
+
+- **Filesystem**: restricted to paths declared in `[permissions]`
+- **Network**: blocked or restricted based on the `network` field
+- **Namespaces**: PID, UTS, IPC, and User isolation via bubblewrap
+- **Seccomp**: blocked network syscalls return `-EPERM` (not SIGSYS)
 
 ## Layers
 
-You can split your app into multiple layers. Common use: one layer for the runtime (like Electron or Qt) shared across multiple apps, and one layer for the app itself.
+Split your app into multiple layers for deduplication:
 
 ```toml
 [[layer]]
@@ -86,49 +102,29 @@ role = "app"
 source = "./staging-app"
 ```
 
-Layers are content-addressed by their blake3 hash. If two bundles share a layer it is stored once on disk.
+Layers are content-addressed by their blake3 hash. Shared layers (e.g., Electron, Qt) are stored once on disk across bundles.
 
 ## Signing
 
-Sign a bundle after packing it:
-
 ```bash
 nxpk sign myapp.nxpk
-```
-
-This calls `cosign sign-blob` under the hood, producing a sigstore bundle embedded in the header. Verify with:
-
-```bash
 nxpk verify myapp.nxpk
 ```
 
-## AppImage Compat
+Calls `cosign sign-blob` under the hood, embedding a Sigstore bundle in the header.
 
-Run an AppImage under the Nexpack sandbox:
+## AppImage Compat
 
 ```bash
 nxpk compat run some-app.appimage
-```
-
-Convert an AppImage to a `.nxpk`:
-
-```bash
 nxpk compat convert some-app.appimage
 ```
 
-The converter does a heuristic permission scan and spits out a `spec.toml` you can edit before repacking.
+The converter does a heuristic permission scan and spits out a `spec.toml`.
 
 ## Daemon
 
-`nexpackd` runs as a per-user daemon. It manages layer mounts, handles IPC from `nxpk` and the ELF stub, and checks for updates in the background.
-
-It starts automatically when you run `nxpk`. You can also start it manually:
-
-```bash
-nexpackd &
-```
-
-Configuration lives in `~/.config/nexpack/daemon.toml`:
+`nexpackd` runs as a per-user daemon. It starts automatically when needed. Configuration at `~/.config/nexpack/daemon.toml`:
 
 ```toml
 idle_timeout = 300
@@ -147,22 +143,18 @@ update_interval = 3600
       current -> ../../../layers/...
       meta.capnp
     gc-roots/
+  bin/               # extracted bootstrap binaries
+    nexpackd
+    nxpk
 ```
 
 ## Building from Source
 
-You need Rust, the capnp protobuf compiler, and `erofs-utils`.
-
 ```bash
 nix develop      # or add capnp and erofs-utils to your system
 cargo build
-cargo build -r   # release build for the bootstrap binaries
-```
-
-The ELF stub is built separately:
-
-```bash
-make -C stub
+cargo build -r   # release build for bootstrap binaries
+make -C stub     # ELF stub (freestanding C, ~5 KB)
 ```
 
 ## The Project
@@ -171,10 +163,10 @@ Four crates:
 
 - `nexpack-core`: types, bundle parsing, store, verifier
 - `nexpackd`: the daemon
-- `nxpk`: the cli
+- `nxpk`: the cli (pack, run, install, sign, etc.)
 - `nexpack-ipc`: capnp schema for ipc and header format
 
-The ELF stub is in `stub/stub.c` -- ~150 lines of freestanding C, direct syscalls, no libc.
+The ELF stub is in `stub/stub.c` — ~530 lines of freestanding C, direct syscalls, no libc.
 
 ## Releases
 

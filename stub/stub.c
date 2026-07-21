@@ -454,12 +454,13 @@ void _start_c(unsigned long *sp)
     if (sock < 0) {
         char nxpk_bin[MAX_ARG_LEN] = {0};
         if (find_in_path("nxpk", nxpk_bin, sizeof(nxpk_bin), envp) == 0) {
-            char *fallback_argv[MAX_ARGS + 3];
+            char *fallback_argv[MAX_ARGS + 5];
             int fi = 0;
             fallback_argv[fi++] = nxpk_bin;
             fallback_argv[fi++] = "run";
+            fallback_argv[fi++] = "--no-sandbox";
             fallback_argv[fi++] = (char *)self_path;
-            for (int j = 1; j < argc && fi < MAX_ARGS + 2; j++) {
+            for (int j = 1; j < argc && fi < MAX_ARGS + 4; j++) {
                 fallback_argv[fi++] = argv[j];
             }
             fallback_argv[fi] = 0;
@@ -471,12 +472,13 @@ void _start_c(unsigned long *sp)
             sock = try_connect_daemon(sock_path);
             if (sock >= 0) {
                 sys_close((int)sock);
-                char *exec_argv[MAX_ARGS + 3];
+                char *exec_argv[MAX_ARGS + 5];
                 int fi = 0;
                 exec_argv[fi++] = extracted_nxpk;
                 exec_argv[fi++] = "run";
+                exec_argv[fi++] = "--no-sandbox";
                 exec_argv[fi++] = (char *)self_path;
-                for (int j = 1; j < argc && fi < MAX_ARGS + 2; j++) {
+                for (int j = 1; j < argc && fi < MAX_ARGS + 4; j++) {
                     exec_argv[fi++] = argv[j];
                 }
                 exec_argv[fi] = 0;
@@ -494,12 +496,13 @@ void _start_c(unsigned long *sp)
 
         char nxpk_bin[MAX_ARG_LEN] = {0};
         if (find_in_path("nxpk", nxpk_bin, sizeof(nxpk_bin), envp) == 0) {
-            char *exec_argv[MAX_ARGS + 3];
+            char *exec_argv[MAX_ARGS + 5];
             int fi = 0;
             exec_argv[fi++] = nxpk_bin;
             exec_argv[fi++] = "run";
+            exec_argv[fi++] = "--no-sandbox";
             exec_argv[fi++] = (char *)self_path;
-            for (int j = 1; j < argc && fi < MAX_ARGS + 2; j++) {
+            for (int j = 1; j < argc && fi < MAX_ARGS + 4; j++) {
                 exec_argv[fi++] = argv[j];
             }
             exec_argv[fi] = 0;
@@ -507,17 +510,22 @@ void _start_c(unsigned long *sp)
         }
 
         char extracted_nxpk[MAX_ARG_LEN] = {0};
-        if (try_bootstrap_and_start_daemon(self_path, envp, extracted_nxpk, sizeof(extracted_nxpk)) == 0) {
-            char *exec_argv[MAX_ARGS + 3];
+        int boot_r = try_bootstrap_and_start_daemon(self_path, envp, extracted_nxpk, sizeof(extracted_nxpk));
+        if (boot_r == 0) {
+            char *exec_argv[MAX_ARGS + 5];
             int fi = 0;
             exec_argv[fi++] = extracted_nxpk;
             exec_argv[fi++] = "run";
+            exec_argv[fi++] = "--no-sandbox";
             exec_argv[fi++] = (char *)self_path;
-            for (int j = 1; j < argc && fi < MAX_ARGS + 2; j++) {
+            for (int j = 1; j < argc && fi < MAX_ARGS + 4; j++) {
                 exec_argv[fi++] = argv[j];
             }
             exec_argv[fi] = 0;
             sys_execve(extracted_nxpk, exec_argv, envp);
+        } else {
+            const char m[] = "nexpack: bootstrap extraction failed\n";
+            sys_write(2, m, str_len(m));
         }
 
         const char m[] = "nexpack: nxpk not found. Install it or run: nxpk run <bundle>\n";

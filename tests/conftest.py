@@ -1,15 +1,29 @@
 import os
 import subprocess
 import shutil
+import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 NXPK = os.path.join(REPO, "target", "debug", "nxpk")
 NEXPACKD = os.path.join(REPO, "target", "debug", "nexpackd")
+TEST_APPS_DIR = os.path.join(HERE, "test-apps")
 
 PASSED = 0
 FAILED = 0
 SKIPPED = 0
+
+
+def _build_test_apps():
+    r = subprocess.run(
+        ["make", "-C", TEST_APPS_DIR, "all"],
+        capture_output=True, text=True, timeout=60,
+    )
+    if r.returncode != 0:
+        print(f"  warning: test-app build failed:\n{r.stderr}", file=sys.stderr)
+
+
+_build_test_apps()
 
 
 def check(msg, cond):
@@ -28,12 +42,16 @@ def skip(msg):
     print(f"  skip {msg}")
 
 
-def build_staging(tmp, name="hello", content="hello from nexpack"):
+def build_staging(tmp, app="simple", entrypoint="hello"):
     d = os.path.join(tmp, "staging")
     os.makedirs(os.path.join(d, "usr", "bin"), exist_ok=True)
-    binary = os.path.join(d, "usr", "bin", name)
-    with open(binary, "w") as f:
-        f.write(f"#!/bin/sh\necho '{content}'")
+    binary = os.path.join(d, "usr", "bin", entrypoint)
+    src = os.path.join(TEST_APPS_DIR, app)
+    if os.path.isfile(src):
+        shutil.copy2(src, binary)
+    else:
+        with open(binary, "w") as f:
+            f.write("#!/bin/sh\necho 'hello from nexpack'")
     os.chmod(binary, 0o755)
     return d
 

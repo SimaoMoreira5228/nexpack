@@ -33,6 +33,8 @@
             b3sum
             erofs-utils
             pythonEnv
+            glibc.static
+            libx11.dev
           ];
 
           PKG_CONFIG_PATH = pkgs.lib.makeSearchPathOutput "dev" "lib/pkgconfig" (with pkgs; [

@@ -6,9 +6,6 @@ use std::process::Command;
 pub fn build_bwrap_args(rootfs: &str, perm: &PermissionSet, entrypoint: &str, app_args: &[String]) -> Vec<OsString> {
 	let mut args: Vec<OsString> = Vec::new();
 
-	args.push("--ro-bind".into());
-	args.push(rootfs.into());
-	args.push("/".into());
 	args.push("--proc".into());
 	args.push("/proc".into());
 	args.push("--dev".into());
@@ -17,6 +14,19 @@ pub fn build_bwrap_args(rootfs: &str, perm: &PermissionSet, entrypoint: &str, ap
 	args.push("/tmp".into());
 	args.push("--tmpfs".into());
 	args.push("/run".into());
+	args.push("--ro-bind".into());
+	args.push(rootfs.into());
+	args.push("/run/app".into());
+
+	for sys_path in ["/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc", "/nix/store"] {
+		if std::path::Path::new(sys_path).exists() {
+			args.push("--ro-bind".into());
+			args.push(sys_path.into());
+			args.push(sys_path.into());
+		}
+	}
+
+	let adjusted_entrypoint = format!("/run/app{}", entrypoint);
 
 	for path in &perm.filesystem {
 		let expanded = shellexpand(path);
@@ -123,11 +133,16 @@ pub fn build_bwrap_args(rootfs: &str, perm: &PermissionSet, entrypoint: &str, ap
 				args.push("DISPLAY".into());
 				args.push(disp.into());
 			}
+			if let Ok(xa) = std::env::var("XAUTHORITY") {
+				args.push("--ro-bind-try".into());
+				args.push(xa.clone().into());
+				args.push(xa.into());
+			}
 		}
 		_ => {}
 	}
 
-	for var in &["HOME", "USER", "LANG", "LC_ALL", "PATH", "TERM"] {
+	for var in &["HOME", "USER", "LANG", "LC_ALL", "PATH", "TERM", "XAUTHORITY"] {
 		if let Ok(val) = std::env::var(var) {
 			args.push("--setenv".into());
 			args.push((*var).into());
@@ -136,7 +151,7 @@ pub fn build_bwrap_args(rootfs: &str, perm: &PermissionSet, entrypoint: &str, ap
 	}
 
 	args.push("--".into());
-	args.push(entrypoint.into());
+	args.push(adjusted_entrypoint.into());
 	for a in app_args {
 		args.push(a.into());
 	}
@@ -171,7 +186,7 @@ fn block_network_syscalls() -> Vec<u8> {
 
 	prog.extend_from_slice(&bpf_stmt(BPF_LD | BPF_W | BPF_ABS, 4));
 
-	prog.extend_from_slice(&bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_X86_64, 0, 1));
+	prog.extend_from_slice(&bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_X86_64, 1, 0));
 
 	prog.extend_from_slice(&bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_KILL));
 
@@ -179,7 +194,7 @@ fn block_network_syscalls() -> Vec<u8> {
 
 	for &sysno in BLACKLIST {
 		prog.extend_from_slice(&bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, sysno, 0, 1));
-		prog.extend_from_slice(&bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_KILL));
+		prog.extend_from_slice(&bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM));
 	}
 
 	prog.extend_from_slice(&bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW));
@@ -196,7 +211,10 @@ const BPF_JEQ: u16 = 0x10;
 const BPF_K: u16 = 0x00;
 
 const SECCOMP_RET_KILL: u32 = 0x00000000;
+const SECCOMP_RET_ERRNO: u32 = 0x00050000;
 const SECCOMP_RET_ALLOW: u32 = 0x7fff0000;
+
+const EPERM: u32 = 1;
 
 const AUDIT_ARCH_X86_64: u32 = 0xC000003Eu32;
 

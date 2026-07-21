@@ -24,18 +24,19 @@ nxpk pack spec.toml
 This creates `myapp.nxpk` in the current directory. You can now run it with:
 
 ```bash
-nxpk run myapp.nxpk
-```
+# Direct execution (requires bootstrap — see below)
+chmod +x myapp.nxpk && ./myapp.nxpk
 
-Or install it:
-
-```bash
-nxpk install myapp.nxpk
+# With nxpk installed
+nxpk run myapp.nxpk                # no sandbox (default)
+nxpk run myapp.nxpk --sandbox      # with sandbox
 ```
 
 ## Sandbox Permissions
 
-If you want sandbox permissions you add a `[permissions]` section to the spec:
+Sandboxing is **opt-in**. By default `nxpk run` runs the app without sandbox (full filesystem access). Pass `--sandbox` to enable bubblewrap isolation.
+
+If you want sandbox permissions, add a `[permissions]` section to the spec:
 
 ```toml
 [app]
@@ -53,11 +54,11 @@ role = "app"
 source = "./staging"
 ```
 
-The permissions section tells Nexpack what the app needs access to. If you set `network` to `false`, the app cannot call `connect()` or `bind()`. If you set `display` to `wayland`, it gets Wayland socket access but not X11. The sandbox enforces all of this at runtime. If the app tries to do something the permissions don't allow, it gets a blocked syscall and crashes.
+The permissions section tells Nexpack what the app needs access to *when sandboxed*. If you set `network` to `false`, blocked syscalls return `-EPERM` (the app gets an error instead of crashing). If you set `display` to `wayland`, it gets Wayland socket access but not X11.
 
 ## Multiple Layers
 
-If your app depends on a shared runtime like Electron or Qt, you can split it into multiple layers. The runtime layer goes first, then the app layer:
+If your app depends on a shared runtime like Electron or Qt, you can split it into multiple layers:
 
 ```toml
 [[layer]]
@@ -69,11 +70,9 @@ role = "app"
 source = "./staging-app"
 ```
 
-Layers are merged via OverlayFS in the order they appear in the spec. The runtime layer is the base, the app layer goes on top. If two bundles share the same runtime layer (same digest), it is stored once on disk.
+Layers are merged via OverlayFS in order. If two bundles share the same runtime layer (same blake3 digest), it is stored once on disk.
 
 ## Verifying and Inspecting
-
-You can verify the bundle after packing:
 
 ```bash
 nxpk verify myapp.nxpk
@@ -82,11 +81,11 @@ nxpk inspect myapp.nxpk
 nxpk inspect myapp.nxpk --json
 ```
 
-`verify` checks the BLAKE3 digests of every layer and the Sigstore signature if one is embedded. `inspect` prints the header, layers, permissions, and SBOM.
+`verify` checks BLAKE3 digests and the Sigstore signature. `inspect` prints the header, layers, permissions, and SBOM.
 
-## Self-Bootstrapping
+## Self-Bootstrapping (Recommended)
 
-If you want the bundle to self-bootstrap so users can `chmod +x myapp.nxpk && ./myapp.nxpk` with zero prior setup, you need to embed static binaries:
+So users can `chmod +x myapp.nxpk && ./myapp.nxpk` with zero prior setup, embed the nexpack runtime binaries:
 
 ```toml
 [bootstrap]
@@ -94,14 +93,12 @@ nexpackd = "./target/release/nexpackd"
 nxpk = "./target/release/nxpk"
 ```
 
-These get extracted to `~/.local/share/nexpack/bin/` on first run. The user does not need Nexpack installed beforehand. This is optional. Without it the user just has to run `nxpk run myapp.nxpk` or `nexpackd &` first.
+On first run the ELF stub extracts them to `~/.local/share/nexpack/bin/`, starts the daemon, and launches your app. Subsequent runs reuse the extracted binaries. Without bootstrap the user needs `nxpk` installed in PATH.
 
 ## Signing
-
-For signing you run this after packing:
 
 ```bash
 nxpk sign myapp.nxpk
 ```
 
-This calls `cosign sign-blob` under the hood and embeds a Sigstore bundle in the header. Users can then verify with `nxpk verify myapp.nxpk` and the daemon will check the signature at mount time too.
+This calls `cosign sign-blob` under the hood and embeds a Sigstore bundle in the header. Users can verify with `nxpk verify myapp.nxpk` and the daemon checks the signature at mount time too.

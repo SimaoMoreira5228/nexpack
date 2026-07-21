@@ -1,5 +1,5 @@
 import os, shutil, tempfile
-from conftest import check, run, NXPK, require_erofs
+from conftest import check, run, NXPK, require_erofs, pack_bundle
 
 
 def test():
@@ -9,18 +9,6 @@ def test():
 
     with tempfile.TemporaryDirectory() as tmp:
         extra = '[permissions]\nnetwork = false\ndisplay = "wayland"\n'
-        _staging = None
-        spec_path = None
-        exec(
-            compile(
-                open(os.path.join(os.path.dirname(__file__), "conftest.py")).read(),
-                "conftest.py",
-                "exec",
-            )
-        )
-
-        from conftest import pack_bundle
-
         bundle = pack_bundle(tmp, extra=extra)
         if bundle is None:
             return

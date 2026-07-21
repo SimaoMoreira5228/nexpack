@@ -77,7 +77,7 @@ pub fn run(bundle_path: &str, args: &[String], sandbox: Option<bool>, offline: b
 
 	let seccomp_filter_data = mount_resp.get_seccomp_filter()?.to_vec();
 
-	let use_sandbox = sandbox.unwrap_or_else(|| !bwrap_args_val.is_empty());
+	let use_sandbox = sandbox.unwrap_or(false);
 
 	if use_sandbox {
 		eprintln!("Launching sandboxed: {} (via bwrap)", entrypoint);
@@ -110,13 +110,15 @@ pub fn run(bundle_path: &str, args: &[String], sandbox: Option<bool>, offline: b
 		anyhow::bail!("failed to exec bwrap: {}", err);
 	}
 
-	eprintln!("Launching: {} in {} (no sandbox)", entrypoint, rootfs);
+	let app_path = std::path::PathBuf::from(rootfs).join(entrypoint.strip_prefix("/").unwrap_or(&entrypoint));
+	eprintln!("Launching: {} (no sandbox)", app_path.display());
 
-	if !args.is_empty() {
-		eprintln!("With args: {:?}", args);
+	if !std::fs::metadata(&app_path).map(|m| m.is_file()).unwrap_or(false) {
+		anyhow::bail!("entrypoint not found at {}", app_path.display());
 	}
 
-	Ok(())
+	let err = Command::new(&app_path).args(args).exec();
+	anyhow::bail!("failed to exec {}: {}", app_path.display(), err);
 }
 
 fn setup_seccomp_fd(filter: &[u8]) -> anyhow::Result<i32> {

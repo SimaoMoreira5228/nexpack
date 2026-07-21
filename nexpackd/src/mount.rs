@@ -16,7 +16,12 @@ pub fn build_overlay(app_id: &str, bundle: &Bundle, store: &nexpack_core::Store)
 			std::fs::create_dir_all(&mount_point).context(format!("creating mount point {}", mount_point.display()))?;
 		}
 
-		if !is_path_mounted(&mount_point) && layer_path.exists() {
+		if is_path_mounted(&mount_point) {
+			tracing::warn!("stale erofs mount at {}, cleaning up", mount_point.display());
+			let _ = unmount_path(&mount_point);
+		}
+
+		if layer_path.exists() {
 			mount_erofs(&layer_path, &mount_point)?;
 		}
 
@@ -27,6 +32,12 @@ pub fn build_overlay(app_id: &str, bundle: &Bundle, store: &nexpack_core::Store)
 	let work_dir = run_dir.join("work");
 	let merged_dir = run_dir.join("rootfs");
 
+	if merged_dir.exists() && is_path_mounted(&merged_dir) {
+		tracing::warn!("stale mount at {}, cleaning up", merged_dir.display());
+		let _ = unmount_path(&merged_dir);
+	}
+	let _ = std::fs::remove_dir_all(&run_dir);
+
 	std::fs::create_dir_all(&upper_dir).context(format!("creating upper dir {}", upper_dir.display()))?;
 	std::fs::create_dir_all(&work_dir).context(format!("creating work dir {}", work_dir.display()))?;
 	std::fs::create_dir_all(&merged_dir).context(format!("creating merged dir {}", merged_dir.display()))?;
@@ -36,8 +47,6 @@ pub fn build_overlay(app_id: &str, bundle: &Bundle, store: &nexpack_core::Store)
 		try_fuse_overlay_mount(&lower_dirs, &upper_dir, &work_dir, &merged_dir)?;
 	}
 
-	prepare_rootfs(&merged_dir)?;
-
 	tracing::info!(
 		"mounted {} overlay: {} lower layers -> {}",
 		app_id,
@@ -46,23 +55,6 @@ pub fn build_overlay(app_id: &str, bundle: &Bundle, store: &nexpack_core::Store)
 	);
 
 	Ok(merged_dir)
-}
-
-fn prepare_rootfs(rootfs: &Path) -> anyhow::Result<()> {
-	for dir in &["proc", "dev", "sys", "tmp", "run"] {
-		let p = rootfs.join(dir);
-		if !p.exists() {
-			std::fs::create_dir_all(&p).with_context(|| format!("creating {dir} in rootfs"))?;
-		}
-	}
-
-	// /dev/pts is needed by bwrap's --dev for the devpts mount
-	let devpts = rootfs.join("dev").join("pts");
-	if !devpts.exists() {
-		std::fs::create_dir_all(&devpts).context("creating /dev/pts in rootfs")?;
-	}
-
-	Ok(())
 }
 
 fn mount_erofs(image: &Path, mount_point: &Path) -> anyhow::Result<()> {
